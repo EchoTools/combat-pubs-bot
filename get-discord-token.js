@@ -1,16 +1,4 @@
-/**
- * get-discord-token.js
- *
- * One-time setup helper: exchanges a Discord OAuth code for an access token +
- * refresh token, then prints the DISCORD_OAUTH_REFRESH_TOKEN value to add to .env.
- *
- * Run: node get-discord-token.js
- *
- * Prerequisites:
- *   1. DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET must be set in .env
- *   2. Add http://localhost:3000/callback as a redirect URI in the Discord app:
- *      https://discord.com/developers/applications/1180461747488956496/oauth2
- */
+
 
 import 'dotenv/config';
 import { createServer } from 'http';
