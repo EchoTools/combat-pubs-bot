@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: combat-pubs-bot
+    runtime: node
+    buildCommand: npm install
+    startCommand: node bot.js
+    envVars:
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: POLL_INTERVAL_MS
+        value: 10000
+      - key: FILTER_GUILD_ID
+        sync: false
