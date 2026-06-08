@@ -19,22 +19,15 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const NAKAMA_URL = (process.env.NAKAMA_URL || 'http://localhost:7350').replace(/\/$/, '');
 const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
-const NAKAMA_USERNAME = process.env.NAKAMA_USERNAME || '';
-const NAKAMA_PASSWORD = process.env.NAKAMA_PASSWORD || '';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
 const STATE_FILE = './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
+// Public status endpoint — no auth required, used for active match data
+const STATUS_URL = 'https://g.echovrce.com/status/matches';
 
-if (!NAKAMA_HTTP_KEY) { console.error('[config] NAKAMA_HTTP_KEY is required'); process.exit(1); }
 if (!DISCORD_WEBHOOK_URL) { console.error('[config] DISCORD_WEBHOOK_URL is required'); process.exit(1); }
-if (!NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
-    if (!process.env.NAKAMA_TOKEN) {
-        console.error('[config] Set NAKAMA_USERNAME + NAKAMA_PASSWORD (recommended) or NAKAMA_TOKEN');
-        process.exit(1);
-    }
-}
 
 // Parse webhook ID + token from URL (needed to resolve channel ID for pinning)
 const _webhookParts = DISCORD_WEBHOOK_URL.match(/webhooks\/(\d+)\/([^/?]+)/);
@@ -70,8 +63,6 @@ function loadState() {
     } catch (e) {
         console.warn('[state] Failed to load state.json, starting fresh:', e.message);
     }
-    if (!state.token) state.token = process.env.NAKAMA_TOKEN || null;
-    if (!state.refreshToken) state.refreshToken = process.env.NAKAMA_REFRESH_TOKEN || null;
     if (!state.matchMessages) state.matchMessages = {};
 }
 
@@ -166,162 +157,23 @@ async function deleteDiscordMessage(messageId) {
     }
 }
 
-// ── Nakama auth ───────────────────────────────────────────────────────────────
-
-// Decode a JWT and return its payload, or null on failure (no external deps needed)
-function decodeJwt(token) {
-    try {
-        const payload = token.split('.')[1];
-        if (!payload) return null;
-        return JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString());
-    } catch (_) { return null; }
-}
-
-// Returns true if the token is missing, invalid, or expires within bufferSecs
-function isTokenExpiringSoon(token, bufferSecs = 300) {
-    const payload = decodeJwt(token);
-    if (!payload?.exp) return true;
-    return Math.floor(Date.now() / 1000) >= payload.exp - bufferSecs;
-}
-
-let sessionDead = false;
-let loginPromise = null;
-
-async function doLogin() {
-    if (loginPromise) return loginPromise;
-    loginPromise = (async () => {
-        if (!NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
-            console.error('[auth] NAKAMA_USERNAME / NAKAMA_PASSWORD not set — cannot re-login');
-            sessionDead = true;
-            return false;
-        }
-        try {
-            console.log('[auth] Logging in as', NAKAMA_USERNAME, '...');
-            const url = `${NAKAMA_URL}/rpc/account/authenticate/password?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: NAKAMA_USERNAME, password: NAKAMA_PASSWORD }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                console.error(`[auth] Login failed ${res.status}:`, data?.message);
-                sessionDead = true;
-                return false;
-            }
-            if (data.token) {
-                state.token = data.token;
-                if (data.refresh_token) state.refreshToken = data.refresh_token;
-                saveState();
-                console.log('[auth] Logged in ✓');
-                sessionDead = false;
-                return true;
-            }
-        } catch (e) { console.error('[auth] Login error:', e.message); }
-        sessionDead = true;
-        return false;
-    })();
-    try { return await loginPromise; } finally { loginPromise = null; }
-}
-
-let refreshPromise = null;
-
-async function doRefreshToken() {
-    if (refreshPromise) return refreshPromise;
-    refreshPromise = (async () => {
-        const rt = state.refreshToken;
-        if (!rt) return doLogin();
-        try {
-            const url = `${NAKAMA_URL}/rpc/device/auth/refresh?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`;
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token: rt }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                console.error(`[auth] Refresh failed ${res.status}:`, data?.message);
-                if (res.status === 401) return doLogin(); // refresh expired — re-login with credentials
-                return false;
-            }
-            if (data.token) {
-                state.token = data.token;
-                if (data.refresh_token) state.refreshToken = data.refresh_token;
-                saveState();
-                console.log('[auth] Token refreshed');
-                return true;
-            }
-        } catch (e) { console.error('[auth] Refresh error:', e.message); }
-        return false;
-    })();
-    try { return await refreshPromise; } finally { refreshPromise = null; }
-}
-
-function authHeaders() {
-    return {
-        'Content-Type': 'application/json',
-        ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
-    };
-}
-
-async function nakamaFetch(url, opts = {}) {
-    if (sessionDead) return new Response(null, { status: 401, statusText: 'Session dead' });
-
-    // Proactively refresh if the token is expiring within 5 minutes — avoids hitting 401s
-    if (isTokenExpiringSoon(state.token)) {
-        const payload = decodeJwt(state.token);
-        const secsLeft = payload?.exp ? payload.exp - Math.floor(Date.now() / 1000) : 0;
-        console.log(`[auth] Token expires in ${secsLeft}s — refreshing proactively`);
-        await doRefreshToken();
-    }
-
-    let res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
-    // Reactive fallback: if we still get 401 (e.g. clock skew or transient), try one more refresh
-    if (res.status === 401) {
-        const ok = await doRefreshToken();
-        if (ok) res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
-    }
-    return res;
-}
-
 // ── Nakama API ────────────────────────────────────────────────────────────────
 
-async function fetchMatchmakerState() {
-    const res = await nakamaFetch(`${NAKAMA_URL}/rpc/matchmaker%2Fstate?unwrap`, {
-        method: 'POST', body: JSON.stringify({}),
-    });
-    if (!res.ok) { console.error(`[nakama] matchmaker/state ${res.status}`); return null; }
-    return res.json().catch(() => null);
+// Public endpoint — no auth required
+async function fetchPublicStatus() {
+    try {
+        const res = await fetch(STATUS_URL);
+        if (!res.ok) { console.error(`[status] HTTP ${res.status}`); return null; }
+        return res.json().catch(() => null);
+    } catch (e) { console.error('[status] Fetch error:', e.message); return null; }
 }
 
-async function fetchActiveMatches() {
-    const res = await nakamaFetch(`${NAKAMA_URL}/match?limit=100&authoritative=true&_ts=${Date.now()}`);
-    if (!res.ok) { console.error(`[nakama] /match ${res.status}`); return null; }
-    const data = await res.json().catch(() => null);
-    return data?.matches || null;
-}
+
 
 // ── Data helpers ──────────────────────────────────────────────────────────────
 
-function parseMatchLabel(match) {
-    try {
-        const raw = match?.label?.value ?? match?.label;
-        if (!raw) return null;
-        if (typeof raw === 'string') return JSON.parse(raw);
-        if (typeof raw === 'object') return raw;
-    } catch (_) { }
-    return null;
-}
-
 function isCombat(modeStr) {
     return String(modeStr || '').toLowerCase().includes('combat');
-}
-
-function formatWaitTime(createdAtNs) {
-    if (!createdAtNs) return 'unknown';
-    const secs = Math.floor((Date.now() - createdAtNs / 1_000_000) / 1000);
-    if (secs < 60) return `${secs}s`;
-    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
 function normalizeTeam(player) {
@@ -365,38 +217,13 @@ const COMBAT_RED = 0xdc2626;
 const COMBAT_ORANGE = 0xf97316;
 const MATCH_BLUE = 0x3b82f6;
 
-function buildQueueEmbed(combatTickets) {
+function buildQueueEmbed(playerCount) {
     const embed = new EmbedBuilder()
         .setColor(COMBAT_RED)
         .setTitle('⚔️ Combat Queue')
+        .setDescription(`**${playerCount}** player${playerCount === 1 ? '' : 's'} searching for a Combat match`)
         .setFooter({ text: 'Last updated' })
         .setTimestamp(new Date());
-
-    const totalPlayers = combatTickets.reduce((sum, t) => sum + (t.Presences?.length || 1), 0);
-    embed.setDescription(`**${totalPlayers}** player${totalPlayers === 1 ? '' : 's'} searching for a Combat match`);
-
-    const lines = [];
-    for (const ticket of combatTickets) {
-        const presences = ticket.Presences || [];
-        const waitStr = formatWaitTime(ticket.CreatedAt);
-        if (presences.length > 1) {
-            const names = presences.map((p) => p.username || 'Unknown').join(', ');
-            lines.push(`👥 **Party of ${presences.length}** — ${names}\n  ⏱ ${waitStr}`);
-        } else {
-            const name = ticket.StringProperties?.display_name || presences[0]?.username || 'Unknown';
-            lines.push(`👤 **${name}**\n  ⏱ ${waitStr}`);
-        }
-    }
-
-    const CHUNK = 4;
-    for (let i = 0; i < lines.length; i += CHUNK) {
-        embed.addFields({
-            name: i === 0 ? `Players (${totalPlayers})` : '\u200b',
-            value: lines.slice(i, i + CHUNK).join('\n').slice(0, 1024),
-            inline: false,
-        });
-    }
-
     return embed;
 }
 
@@ -419,10 +246,20 @@ function buildMatchEmbed(game) {
         .setFooter({ text: `Match ${matchIdShort} · Last updated` })
         .setTimestamp(new Date());
 
+    const gs = label?.game_state;
     const infoLines = [`**Players:** ${label?.player_count || players.length} / ${label?.player_limit || '?'}`];
+    if (gs?.session_scoreboard?.game_time_ns != null) {
+        const secs = Math.floor(gs.session_scoreboard.game_time_ns / 1_000_000_000);
+        const m = Math.floor(Math.abs(secs) / 60);
+        const s = Math.abs(secs) % 60;
+        const timeStr = `${m}:${String(s).padStart(2, '0')}`;
+        infoLines.push(`**Time:** ${secs < 0 ? `Starting in ${timeStr}` : timeStr}`);
+    }
     if (label?.open != null) infoLines.push(`**Lobby:** ${label.open ? '🟢 Open' : '🔴 Closed'}`);
     const mapName = formatMapName(label?.level);
     if (mapName) infoLines.push(`**Map:** ${mapName}`);
+    const region = label?.broadcaster?.region;
+    if (region) infoLines.push(`**Region:** ${region}`);
     embed.addFields({ name: 'Match Info', value: infoLines.join('\n'), inline: false });
 
     if (blueTeam.length > 0) embed.addFields({
@@ -446,8 +283,8 @@ function buildMatchEmbed(game) {
 
 // ── Discord message management ────────────────────────────────────────────────
 
-async function handleQueueMessage(combatTickets) {
-    if (combatTickets.length === 0) {
+async function handleQueueMessage(playerCount) {
+    if (playerCount === 0) {
         if (state.queueMessageId) {
             await deleteDiscordMessage(state.queueMessageId);
             state.queueMessageId = null;
@@ -456,7 +293,7 @@ async function handleQueueMessage(combatTickets) {
         return;
     }
 
-    const embed = buildQueueEmbed(combatTickets);
+    const embed = buildQueueEmbed(playerCount);
     try {
         if (state.queueMessageId) {
             await webhook.editMessage(state.queueMessageId, { embeds: [embed] });
@@ -521,50 +358,41 @@ async function handleAllMatchMessages(activeResults) {
 const lastPoll = { tickets: -1, games: -1 };
 
 async function poll() {
-    if (sessionDead) return;
     try {
-        const [matchmakerData, allMatches] = await Promise.all([
-            fetchMatchmakerState(),
-            fetchActiveMatches(),
-        ]);
+        const statusData = await fetchPublicStatus();
+        if (!statusData) return;
 
-        // ── Queue ──────────────────────────────────────────────────────────────
-        if (matchmakerData !== null) {
-            let combatTickets = (matchmakerData.index || []).filter((t) =>
-                isCombat(t.StringProperties?.game_mode)
-            );
-            if (FILTER_GUILD_ID) {
-                combatTickets = combatTickets.filter(
-                    (t) => t.StringProperties?.group_id === FILTER_GUILD_ID
-                );
+        // ── Queue count (from public status) ──────────────────────────────────
+        const mmCounts = statusData.active_matchmaking_counts || {};
+        let queueCount = 0;
+        for (const groupCounts of Object.values(mmCounts)) {
+            for (const [mode, count] of Object.entries(groupCounts)) {
+                if (isCombat(mode)) queueCount += count;
             }
-            if (combatTickets.length !== lastPoll.tickets) {
-                console.log(`[poll] Combat tickets: ${combatTickets.length}`);
-                lastPoll.tickets = combatTickets.length;
-            }
-            await handleQueueMessage(combatTickets);
         }
-
-        // ── Active matches ─────────────────────────────────────────────────────
-        if (allMatches !== null) {
-            let combatGames = allMatches
-                .map((m) => ({ match_id: m.match_id, label: parseMatchLabel(m) }))
-                .filter((g) =>
-                    g.label &&
-                    isCombat(g.label.mode) &&
-                    !String(g.label.mode || '').toLowerCase().includes('private') &&
-                    g.label.lobby_type !== 'private' &&
-                    (g.label.player_count || g.label.players?.length || 0) > 0
-                );
-
-            if (FILTER_GUILD_ID) {
-                combatGames = combatGames.filter((g) =>
-                    g.label.group_id === FILTER_GUILD_ID ||
-                    g.label.groupId === FILTER_GUILD_ID ||
-                    g.label.guild_id === FILTER_GUILD_ID
-                );
+        if (FILTER_GUILD_ID && mmCounts[FILTER_GUILD_ID]) {
+            queueCount = 0;
+            for (const [mode, count] of Object.entries(mmCounts[FILTER_GUILD_ID])) {
+                if (isCombat(mode)) queueCount += count;
             }
+        }
+        if (queueCount !== lastPoll.tickets) {
+            console.log(`[poll] Combat queue: ${queueCount}`);
+            lastPoll.tickets = queueCount;
+        }
+        await handleQueueMessage(queueCount);
 
+        // ── Active matches (public) ───────────────────────────────────────────
+        if (statusData?.labels) {
+            let combatGames = statusData.labels
+                .filter((label) =>
+                    isCombat(label.mode) &&
+                    label.lobby_type !== 'private' &&
+                    !String(label.mode || '').toLowerCase().includes('private') &&
+                    (label.player_count || label.players?.length || 0) > 0 &&
+                    (!FILTER_GUILD_ID || label.group_id === FILTER_GUILD_ID)
+                )
+                .map((label) => ({ match_id: label.id, label }));
 
             if (combatGames.length !== lastPoll.games) {
                 console.log(`[poll] Active combat games: ${combatGames.length}`);
@@ -580,16 +408,12 @@ async function poll() {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 console.log(`[bot] Combat Pubs Bot starting…`);
-console.log(`[bot] Nakama: ${NAKAMA_URL}`);
+console.log(`[bot] Matches + queue: ${STATUS_URL} (no auth required)`);
 console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
 loadState();
-fetchChannelId().then(async () => {
-    // If no cached token, do a fresh login before starting the poll loop
-    if (!state.token && NAKAMA_USERNAME && NAKAMA_PASSWORD) {
-        await doLogin();
-    }
+fetchChannelId().then(() => {
     poll();
     setInterval(poll, POLL_INTERVAL_MS);
 });

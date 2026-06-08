@@ -1,95 +1,85 @@
-
+/**
+ * One-time setup: get a Nakama session token using your EchoVRCE password.
+ * Ref: https://github.com/EchoTools/nakama/wiki#obtaining-a-session-token
+ *
+ * After running this once, the bot refreshes tokens automatically.
+ * Only re-run if the bot has been offline for 7+ consecutive days.
+ *
+ * Usage: node get-discord-token.js
+ */
 
 import 'dotenv/config';
-import { createServer } from 'http';
+import { createInterface } from 'readline';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const PORT = 3000;
-const REDIRECT_URI = `http://localhost:${PORT}/callback`;
+const NAKAMA_URL = (process.env.NAKAMA_URL || 'https://g.echovrce.com:7350/v2').replace(/\/$/, '');
+const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
+const STATE_FILE = './state.json';
 
-if (!CLIENT_ID) {
-    console.error('[error] DISCORD_CLIENT_ID not set in .env');
-    process.exit(1);
-}
-if (!CLIENT_SECRET) {
-    console.error('[error] DISCORD_CLIENT_SECRET not set in .env');
+if (!NAKAMA_HTTP_KEY) {
+    console.error('[error] NAKAMA_HTTP_KEY not set in .env');
     process.exit(1);
 }
 
-const authUrl =
-    `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}` +
-    `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-    `&response_type=code&scope=identify`;
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
 
-console.log('\n=== Discord OAuth Token Helper ===\n');
-console.log('Step 1 — Make sure this redirect URI is added to the Discord app:');
-console.log(`  ${REDIRECT_URI}`);
-console.log('  (Discord Developer Portal → Your App → OAuth2 → Redirects → Add)\n');
-console.log('Step 2 — Open this URL in your browser and click Authorize:');
-console.log(`  ${authUrl}\n`);
-console.log('Waiting for redirect callback...\n');
+console.log('\n=== EchoVRCE Token Setup ===\n');
+console.log('Enter your EchoVRCE login. You can use username, Discord ID, or Nakama user_id.\n');
 
-const server = createServer(async (req, res) => {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
-    if (url.pathname !== '/callback') {
-        res.writeHead(404);
-        res.end();
-        return;
-    }
+const identifier = (await ask('Username / Discord ID / User ID: ')).trim();
+const password = (await ask('Password: ')).trim();
+rl.close();
 
-    const code = url.searchParams.get('code');
-    if (!code) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end('No authorization code in callback URL.');
-        console.error('[error] Callback received without a code.');
-        server.close();
-        return;
-    }
+if (!identifier || !password) {
+    console.error('[error] Both fields are required.');
+    process.exit(1);
+}
 
-    try {
-        const tokenRes = await fetch('https://discord.com/api/v10/oauth2/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-                grant_type: 'authorization_code',
-                code,
-                redirect_uri: REDIRECT_URI,
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-            }).toString(),
-        });
+// Pick the right field per the wiki
+let body;
+if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier)) {
+    body = { user_id: identifier, password };          // Nakama UUID
+} else if (/^\d{17,20}$/.test(identifier)) {
+    body = { discord_id: identifier, password };       // Discord snowflake
+} else {
+    body = { username: identifier, password };         // username
+}
 
-        const data = await tokenRes.json();
+console.log('\nAuthenticating...');
 
-        if (!tokenRes.ok) {
-            const msg = data?.error_description || data?.error || 'Unknown error';
-            console.error('[error] Token exchange failed:', msg);
-            res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end(`<h2>Error: ${msg}</h2><p>Check the terminal for details.</p>`);
-            server.close();
-            return;
-        }
+const url = `${NAKAMA_URL}/rpc/account/authenticate/password?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`;
+let res;
+try {
+    res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+} catch (e) {
+    console.error('[error] Could not reach server:', e.message);
+    process.exit(1);
+}
 
-        console.log('✓ Success!\n');
-        console.log('Add this line to your .env file:\n');
-        console.log(`DISCORD_OAUTH_REFRESH_TOKEN=${data.refresh_token}`);
-        console.log('\nThen restart the bot.\n');
+const data = await res.json().catch(() => ({}));
+if (!res.ok) {
+    console.error('[error] Authentication failed:', data?.message || res.statusText);
+    process.exit(1);
+}
+if (!data.token || !data.refresh_token) {
+    console.error('[error] No tokens in response:', JSON.stringify(data));
+    process.exit(1);
+}
 
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(
-            '<h2 style="font-family:sans-serif;color:green">&#10003; Success!</h2>' +
-            '<p style="font-family:sans-serif">Check your terminal for the token value. You can close this tab.</p>'
-        );
-    } catch (e) {
-        console.error('[error]', e.message);
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Error: ' + e.message);
-    } finally {
-        server.close();
-    }
-});
+let savedState = {};
+try {
+    if (existsSync(STATE_FILE)) savedState = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+} catch (_) { }
 
-server.listen(PORT, () => {
-    console.log(`[server] Listening on http://localhost:${PORT}/callback ...`);
-});
+savedState.token = data.token;
+savedState.refreshToken = data.refresh_token;
+delete savedState.discordRefreshToken;
+
+writeFileSync(STATE_FILE, JSON.stringify(savedState, null, 2));
+
+console.log('\nTokens saved to state.json - start the bot now.\n');
