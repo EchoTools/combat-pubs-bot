@@ -19,6 +19,8 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const NAKAMA_URL = (process.env.NAKAMA_URL || 'http://localhost:7350').replace(/\/$/, '');
 const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
+const NAKAMA_USERNAME = process.env.NAKAMA_USERNAME || '';
+const NAKAMA_PASSWORD = process.env.NAKAMA_PASSWORD || '';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
@@ -27,7 +29,12 @@ const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
 
 if (!NAKAMA_HTTP_KEY) { console.error('[config] NAKAMA_HTTP_KEY is required'); process.exit(1); }
 if (!DISCORD_WEBHOOK_URL) { console.error('[config] DISCORD_WEBHOOK_URL is required'); process.exit(1); }
-if (!process.env.NAKAMA_TOKEN) { console.error('[config] NAKAMA_TOKEN is required'); process.exit(1); }
+if (!NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
+    if (!process.env.NAKAMA_TOKEN) {
+        console.error('[config] Set NAKAMA_USERNAME + NAKAMA_PASSWORD (recommended) or NAKAMA_TOKEN');
+        process.exit(1);
+    }
+}
 
 // Parse webhook ID + token from URL (needed to resolve channel ID for pinning)
 const _webhookParts = DISCORD_WEBHOOK_URL.match(/webhooks\/(\d+)\/([^/?]+)/);
@@ -65,9 +72,6 @@ function loadState() {
     }
     if (!state.token) state.token = process.env.NAKAMA_TOKEN || null;
     if (!state.refreshToken) state.refreshToken = process.env.NAKAMA_REFRESH_TOKEN || null;
-    // Always prefer tokens from .env over cached state — lets manual token updates take effect on restart
-    if (process.env.NAKAMA_TOKEN) state.token = process.env.NAKAMA_TOKEN;
-    if (process.env.NAKAMA_REFRESH_TOKEN) state.refreshToken = process.env.NAKAMA_REFRESH_TOKEN;
     if (!state.matchMessages) state.matchMessages = {};
 }
 
@@ -165,6 +169,44 @@ async function deleteDiscordMessage(messageId) {
 // ── Nakama auth ───────────────────────────────────────────────────────────────
 
 let sessionDead = false;
+let loginPromise = null;
+
+async function doLogin() {
+    if (loginPromise) return loginPromise;
+    loginPromise = (async () => {
+        if (!NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
+            console.error('[auth] NAKAMA_USERNAME / NAKAMA_PASSWORD not set — cannot re-login');
+            sessionDead = true;
+            return false;
+        }
+        try {
+            console.log('[auth] Logging in as', NAKAMA_USERNAME, '...');
+            const url = `${NAKAMA_URL}/rpc/account/authenticate/password?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`;
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: NAKAMA_USERNAME, password: NAKAMA_PASSWORD }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                console.error(`[auth] Login failed ${res.status}:`, data?.message);
+                sessionDead = true;
+                return false;
+            }
+            if (data.token) {
+                state.token = data.token;
+                if (data.refresh_token) state.refreshToken = data.refresh_token;
+                saveState();
+                console.log('[auth] Logged in ✓');
+                sessionDead = false;
+                return true;
+            }
+        } catch (e) { console.error('[auth] Login error:', e.message); }
+        sessionDead = true;
+        return false;
+    })();
+    try { return await loginPromise; } finally { loginPromise = null; }
+}
 
 let refreshPromise = null;
 
@@ -172,7 +214,7 @@ async function doRefreshToken() {
     if (refreshPromise) return refreshPromise;
     refreshPromise = (async () => {
         const rt = state.refreshToken;
-        if (!rt) { console.error('[auth] No refresh token — add NAKAMA_REFRESH_TOKEN to .env'); return false; }
+        if (!rt) return doLogin();
         try {
             const url = `${NAKAMA_URL}/rpc/device/auth/refresh?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`;
             const res = await fetch(url, {
@@ -183,10 +225,7 @@ async function doRefreshToken() {
             const data = await res.json().catch(() => ({}));
             if (!res.ok) {
                 console.error(`[auth] Refresh failed ${res.status}:`, data?.message);
-                if (res.status === 401) {
-                    sessionDead = true;
-                    console.error('[auth] Session fully expired — update NAKAMA_TOKEN and NAKAMA_REFRESH_TOKEN in .env and restart.');
-                }
+                if (res.status === 401) return doLogin(); // refresh expired — re-login with credentials
                 return false;
             }
             if (data.token) {
@@ -512,7 +551,11 @@ console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
 loadState();
-fetchChannelId().then(() => {
+fetchChannelId().then(async () => {
+    // If no cached token, do a fresh login before starting the poll loop
+    if (!state.token && NAKAMA_USERNAME && NAKAMA_PASSWORD) {
+        await doLogin();
+    }
     poll();
     setInterval(poll, POLL_INTERVAL_MS);
 });
