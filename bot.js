@@ -269,6 +269,9 @@ async function nakamaFetch(url, opts = {}) {
 
     // Proactively refresh if the token is expiring within 5 minutes — avoids hitting 401s
     if (isTokenExpiringSoon(state.token)) {
+        const payload = decodeJwt(state.token);
+        const secsLeft = payload?.exp ? payload.exp - Math.floor(Date.now() / 1000) : 0;
+        console.log(`[auth] Token expires in ${secsLeft}s — refreshing proactively`);
         await doRefreshToken();
     }
 
@@ -515,6 +518,8 @@ async function handleAllMatchMessages(activeResults) {
 
 // ── Main poll loop ────────────────────────────────────────────────────────────
 
+const lastPoll = { tickets: -1, games: -1 };
+
 async function poll() {
     if (sessionDead) return;
     try {
@@ -533,7 +538,10 @@ async function poll() {
                     (t) => t.StringProperties?.group_id === FILTER_GUILD_ID
                 );
             }
-            console.log(`[poll] Combat tickets: ${combatTickets.length}`);
+            if (combatTickets.length !== lastPoll.tickets) {
+                console.log(`[poll] Combat tickets: ${combatTickets.length}`);
+                lastPoll.tickets = combatTickets.length;
+            }
             await handleQueueMessage(combatTickets);
         }
 
@@ -558,7 +566,10 @@ async function poll() {
             }
 
 
-            console.log(`[poll] Active combat games: ${combatGames.length}`);
+            if (combatGames.length !== lastPoll.games) {
+                console.log(`[poll] Active combat games: ${combatGames.length}`);
+                lastPoll.games = combatGames.length;
+            }
             await handleAllMatchMessages(combatGames.map((g) => buildMatchEmbed(g)));
         }
     } catch (e) {
