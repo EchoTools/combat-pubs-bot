@@ -168,6 +168,22 @@ async function deleteDiscordMessage(messageId) {
 
 // ── Nakama auth ───────────────────────────────────────────────────────────────
 
+// Decode a JWT and return its payload, or null on failure (no external deps needed)
+function decodeJwt(token) {
+    try {
+        const payload = token.split('.')[1];
+        if (!payload) return null;
+        return JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString());
+    } catch (_) { return null; }
+}
+
+// Returns true if the token is missing, invalid, or expires within bufferSecs
+function isTokenExpiringSoon(token, bufferSecs = 300) {
+    const payload = decodeJwt(token);
+    if (!payload?.exp) return true;
+    return Math.floor(Date.now() / 1000) >= payload.exp - bufferSecs;
+}
+
 let sessionDead = false;
 let loginPromise = null;
 
@@ -250,7 +266,14 @@ function authHeaders() {
 
 async function nakamaFetch(url, opts = {}) {
     if (sessionDead) return new Response(null, { status: 401, statusText: 'Session dead' });
+
+    // Proactively refresh if the token is expiring within 5 minutes — avoids hitting 401s
+    if (isTokenExpiringSoon(state.token)) {
+        await doRefreshToken();
+    }
+
     let res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
+    // Reactive fallback: if we still get 401 (e.g. clock skew or transient), try one more refresh
     if (res.status === 401) {
         const ok = await doRefreshToken();
         if (ok) res = await fetch(url, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
