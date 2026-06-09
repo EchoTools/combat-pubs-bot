@@ -17,14 +17,16 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const NAKAMA_URL = (process.env.NAKAMA_URL || 'http://localhost:7350').replace(/\/$/, '');
+const NAKAMA_URL = (process.env.NAKAMA_URL || 'https://g.echovrce.com:7350').replace(/\/$/, '');
+// Normalize to always have /v2 base for Nakama REST API
+const NAKAMA_API = NAKAMA_URL.replace(/\/v2\/?$/, '') + '/v2';
 const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
 const STATE_FILE = './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
-// Public status endpoint — no auth required, used for active match data
+// Public status endpoint — no auth required, fallback for queue + active match data
 const STATUS_URL = 'https://g.echovrce.com/status/matches';
 
 if (!DISCORD_WEBHOOK_URL) { console.error('[config] DISCORD_WEBHOOK_URL is required'); process.exit(1); }
@@ -166,6 +168,83 @@ async function fetchPublicStatus() {
         if (!res.ok) { console.error(`[status] HTTP ${res.status}`); return null; }
         return res.json().catch(() => null);
     } catch (e) { console.error('[status] Fetch error:', e.message); return null; }
+}
+
+// Refresh the stored Nakama JWT using the refresh token.
+// Returns the new token string, or null on failure.
+async function refreshNakamaToken() {
+    if (!state.refreshToken || !NAKAMA_HTTP_KEY) return null;
+    try {
+        const res = await fetch(
+            `${NAKAMA_API}/rpc/device/auth/refresh?unwrap&http_key=${encodeURIComponent(NAKAMA_HTTP_KEY)}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: state.refreshToken }),
+            }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            console.warn('[nakama] Token refresh failed:', res.status, data?.message || '');
+            return null;
+        }
+        if (data.token) {
+            state.token = data.token;
+            if (data.refresh_token) state.refreshToken = data.refresh_token;
+            saveState();
+            console.log('[nakama] Token refreshed successfully');
+            return data.token;
+        }
+    } catch (e) {
+        console.warn('[nakama] Token refresh error:', e.message);
+    }
+    return null;
+}
+
+// Call a Nakama RPC with the stored JWT. Automatically refreshes on 401.
+// Returns parsed JSON, or null if auth is unavailable or the call fails.
+async function callNakamaRpc(rpcId, body = {}) {
+    if (!state.token && !state.refreshToken) return null;
+    // If we have no token yet but have a refresh token, try to get one first
+    if (!state.token) {
+        const t = await refreshNakamaToken();
+        if (!t) return null;
+    }
+    const url = `${NAKAMA_API}/rpc/${rpcId}?unwrap`;
+    const doFetch = (token) => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+    });
+    let res = await doFetch(state.token);
+    if (res.status === 401) {
+        const newToken = await refreshNakamaToken();
+        if (!newToken) {
+            console.warn('[nakama] Auth unavailable — falling back to public endpoint');
+            return null;
+        }
+        res = await doFetch(newToken);
+    }
+    if (!res.ok) {
+        console.warn(`[nakama] RPC ${rpcId} returned ${res.status}`);
+        return null;
+    }
+    return res.json().catch(() => null);
+}
+
+// Fetch queue count from authenticated matchmaker/state RPC.
+// Returns the combat player count, or null if auth fails (caller should fall back).
+async function fetchMatchmakerQueueCount() {
+    const data = await callNakamaRpc('matchmaker/state', {});
+    if (!data) return null;
+    // Filter tickets to combat mode
+    const index = Array.isArray(data.index) ? data.index : [];
+    if (index.length > 0) {
+        return index.filter((t) => isCombat(t.mode || t.query || '')).length;
+    }
+    // Fall back to stats.ticket_count if index is empty/absent
+    const count = data.stats?.ticket_count;
+    return typeof count === 'number' ? count : null;
 }
 
 
@@ -359,30 +438,40 @@ const lastPoll = { tickets: -1, games: -1 };
 
 async function poll() {
     try {
-        const statusData = await fetchPublicStatus();
-        if (!statusData) return;
+        // ── Queue count — try authenticated RPC first, fall back to public ────
+        let queueCount = await fetchMatchmakerQueueCount();
+        let statusData = null;
 
-        // ── Queue count (from public status) ──────────────────────────────────
-        const mmCounts = statusData.active_matchmaking_counts || {};
-        let queueCount = 0;
-        for (const groupCounts of Object.values(mmCounts)) {
-            for (const [mode, count] of Object.entries(groupCounts)) {
-                if (isCombat(mode)) queueCount += count;
-            }
-        }
-        if (FILTER_GUILD_ID && mmCounts[FILTER_GUILD_ID]) {
+        if (queueCount === null) {
+            // Auth unavailable or failed — use public status for queue count
+            statusData = await fetchPublicStatus();
+            if (!statusData) return;
+            const mmCounts = statusData.active_matchmaking_counts || {};
             queueCount = 0;
-            for (const [mode, count] of Object.entries(mmCounts[FILTER_GUILD_ID])) {
-                if (isCombat(mode)) queueCount += count;
+            const source = (FILTER_GUILD_ID && mmCounts[FILTER_GUILD_ID]) ? mmCounts[FILTER_GUILD_ID] : null;
+            if (source) {
+                for (const [mode, count] of Object.entries(source)) {
+                    if (isCombat(mode)) queueCount += count;
+                }
+            } else {
+                for (const groupCounts of Object.values(mmCounts)) {
+                    for (const [mode, count] of Object.entries(groupCounts)) {
+                        if (isCombat(mode)) queueCount += count;
+                    }
+                }
             }
         }
+
         if (queueCount !== lastPoll.tickets) {
             console.log(`[poll] Combat queue: ${queueCount}`);
             lastPoll.tickets = queueCount;
         }
         await handleQueueMessage(queueCount);
 
-        // ── Active matches (public) ───────────────────────────────────────────
+        // Active match data always comes from the public status endpoint
+        if (!statusData) statusData = await fetchPublicStatus();
+
+        // ── Active matches ────────────────────────────────────────────────────
         if (statusData?.labels) {
             let combatGames = statusData.labels
                 .filter((label) =>
@@ -439,7 +528,7 @@ async function cleanupOrphanedQueueMessages() {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 console.log(`[bot] Combat Pubs Bot starting…`);
-console.log(`[bot] Matches + queue: ${STATUS_URL} (no auth required)`);
+console.log(`[bot] Queue: ${NAKAMA_API}/rpc/matchmaker/state (auth) with fallback to ${STATUS_URL}`);
 console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
