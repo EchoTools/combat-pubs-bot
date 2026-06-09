@@ -405,6 +405,37 @@ async function poll() {
     }
 }
 
+// ── Startup cleanup ───────────────────────────────────────────────────────────
+
+/**
+ * Scan the channel for any webhook-owned "Combat Queue" embed messages that
+ * the bot no longer tracks and delete them, preventing duplicate queue posts
+ * after restarts.
+ */
+async function cleanupOrphanedQueueMessages() {
+    if (!DISCORD_BOT_TOKEN || !channelId || !WEBHOOK_ID) return;
+    try {
+        const res = await fetch(
+            `https://discord.com/api/v10/channels/${channelId}/messages?limit=50`,
+            { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } }
+        );
+        if (!res.ok) return;
+        const messages = await res.json().catch(() => []);
+        for (const msg of messages) {
+            if (
+                msg.webhook_id === WEBHOOK_ID &&
+                msg.embeds?.[0]?.title?.includes('Combat Queue') &&
+                msg.id !== state.queueMessageId
+            ) {
+                console.log('[discord] Deleting orphaned queue message:', msg.id);
+                await deleteDiscordMessage(msg.id);
+            }
+        }
+    } catch (e) {
+        console.warn('[discord] Could not clean up orphaned queue messages:', e.message);
+    }
+}
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 console.log(`[bot] Combat Pubs Bot starting…`);
@@ -413,7 +444,8 @@ console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
 loadState();
-fetchChannelId().then(() => {
+fetchChannelId().then(async () => {
+    await cleanupOrphanedQueueMessages();
     poll();
     setInterval(poll, POLL_INTERVAL_MS);
 });
