@@ -221,7 +221,7 @@ function buildQueueEmbed(playerCount) {
     const embed = new EmbedBuilder()
         .setColor(COMBAT_RED)
         .setTitle('⚔️ Combat Queue')
-        .setDescription(`**${playerCount}** player${playerCount === 1 ? '' : 's'} searching for a Combat match`)
+        .setDescription(`# ${playerCount}\nplayer${playerCount === 1 ? '' : 's'} searching for a Combat match`)
         .setFooter({ text: 'Last updated' })
         .setTimestamp(new Date());
     return embed;
