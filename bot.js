@@ -200,7 +200,7 @@ const MAP_NAMES = {
     mpl_combat_fission: 'Fission',
     mpl_combat_combustion: 'Combustion',
     mpl_combat_dyson: 'Dyson',
-    mpl_combat_gauss: 'Gauss',
+    mpl_combat_gauss: 'Surge',
     mpl_combat_rise: 'Rise',
     mpl_combat_archaic: 'Archaic',
     mpl_combat_harvest: 'Harvest',
