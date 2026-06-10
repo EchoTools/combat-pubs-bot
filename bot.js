@@ -497,9 +497,8 @@ async function poll() {
 // ── Startup cleanup ───────────────────────────────────────────────────────────
 
 /**
- * Scan the channel for any webhook-owned "Combat Queue" embed messages that
- * the bot no longer tracks and delete them, preventing duplicate queue posts
- * after restarts.
+ * On startup, delete ALL webhook-owned "Combat Queue" messages in the channel
+ * and reset the tracked ID, so the first poll always starts from a clean state.
  */
 async function cleanupOrphanedQueueMessages() {
     if (!DISCORD_BOT_TOKEN || !channelId || !WEBHOOK_ID) return;
@@ -513,15 +512,17 @@ async function cleanupOrphanedQueueMessages() {
         for (const msg of messages) {
             if (
                 msg.webhook_id === WEBHOOK_ID &&
-                msg.embeds?.[0]?.title?.includes('Combat Queue') &&
-                msg.id !== state.queueMessageId
+                msg.embeds?.[0]?.title?.includes('Combat Queue')
             ) {
-                console.log('[discord] Deleting orphaned queue message:', msg.id);
+                console.log('[discord] Deleting queue message on startup:', msg.id);
                 await deleteDiscordMessage(msg.id);
             }
         }
+        // Always reset so the first poll posts a fresh message
+        state.queueMessageId = null;
+        saveState();
     } catch (e) {
-        console.warn('[discord] Could not clean up orphaned queue messages:', e.message);
+        console.warn('[discord] Could not clean up queue messages:', e.message);
     }
 }
 
