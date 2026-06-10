@@ -19,7 +19,3 @@ services:
         value: 10000
       - key: FILTER_GUILD_ID
         sync: false
-      - key: NAKAMA_URL
-        value: https://g.echovrce.com:7350
-      - key: NAKAMA_HTTP_KEY
-        sync: false
