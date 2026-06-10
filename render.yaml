@@ -4,7 +4,13 @@ services:
     runtime: node
     buildCommand: npm install
     startCommand: node bot.js
+    disk:
+      name: bot-state
+      mountPath: /data
+      sizeGB: 1
     envVars:
+      - key: STATE_FILE
+        value: /data/state.json
       - key: DISCORD_WEBHOOK_URL
         sync: false
       - key: DISCORD_BOT_TOKEN

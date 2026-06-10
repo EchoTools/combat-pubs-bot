@@ -24,7 +24,7 @@ const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
-const STATE_FILE = './state.json';
+const STATE_FILE = process.env.STATE_FILE || './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
 // Public status endpoint — no auth required, fallback for queue + active match data
 const STATUS_URL = 'https://g.echovrce.com/status/matches';
