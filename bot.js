@@ -279,6 +279,9 @@ function buildMatchEmbed(game) {
 
 // ── Discord message management ────────────────────────────────────────────────
 
+// Guard against concurrent queue message posts
+let queuePostInProgress = false;
+
 async function handleQueueMessage(playerCount) {
     if (playerCount === 0) {
         if (state.queueMessageId) {
@@ -294,11 +297,17 @@ async function handleQueueMessage(playerCount) {
         if (state.queueMessageId) {
             await webhook.editMessage(state.queueMessageId, { embeds: [embed] });
         } else {
-            const msg = await webhook.send({ embeds: [embed] });
-            state.queueMessageId = msg.id;
-            saveState();
-            console.log('[discord] Posted queue message:', msg.id);
-            await pinMessage(msg.id);
+            if (queuePostInProgress) return; // another poll is already posting
+            queuePostInProgress = true;
+            try {
+                const msg = await webhook.send({ embeds: [embed] });
+                state.queueMessageId = msg.id;
+                saveState();
+                console.log('[discord] Posted queue message:', msg.id);
+                await pinMessage(msg.id);
+            } finally {
+                queuePostInProgress = false;
+            }
         }
     } catch (e) {
         if (e.code === 10008 || String(e.message).includes('Unknown Message')) {
@@ -352,8 +361,11 @@ async function handleAllMatchMessages(activeResults) {
 // ── Main poll loop ────────────────────────────────────────────────────────────
 
 const lastPoll = { tickets: -1, games: -1 };
+let pollRunning = false;
 
 async function poll() {
+    if (pollRunning) return; // skip if previous poll hasn't finished
+    pollRunning = true;
     try {
         const statusData = await fetchPublicStatus();
         if (!statusData) return;
@@ -400,16 +412,21 @@ async function poll() {
         }
     } catch (e) {
         console.error('[poll] Unhandled error:', e.message);
+    } finally {
+        pollRunning = false;
     }
 }
 
 // ── Startup cleanup ───────────────────────────────────────────────────────────
 
 /**
- * On startup, delete ALL webhook-owned "Combat Queue" messages in the channel
- * and reset the tracked ID, so the first poll always starts from a clean state.
+ * On startup, scan the channel for any existing Combat Queue embeds posted by
+ * this webhook. If exactly one is found, adopt its ID so the bot edits it going
+ * forward instead of posting a new one. If multiple exist (e.g. from a previous
+ * double-post), delete the extras and keep the newest. This means the bot
+ * recovers cleanly even when state.json is wiped (e.g. Render ephemeral disk).
  */
-async function cleanupOrphanedQueueMessages() {
+async function recoverQueueMessageId() {
     if (!DISCORD_BOT_TOKEN || !channelId || !WEBHOOK_ID) return;
     try {
         const res = await fetch(
@@ -418,20 +435,26 @@ async function cleanupOrphanedQueueMessages() {
         );
         if (!res.ok) return;
         const messages = await res.json().catch(() => []);
-        for (const msg of messages) {
-            if (
-                msg.webhook_id === WEBHOOK_ID &&
-                msg.embeds?.[0]?.title?.includes('Combat Queue')
-            ) {
-                console.log('[discord] Deleting queue message on startup:', msg.id);
+        const queueMsgs = messages.filter((msg) =>
+            msg.webhook_id === WEBHOOK_ID &&
+            msg.embeds?.[0]?.title?.includes('Combat Queue')
+        );
+        if (queueMsgs.length === 0) {
+            state.queueMessageId = null;
+        } else {
+            // Sort newest first (Discord snowflake IDs are chronological)
+            queueMsgs.sort((a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : -1));
+            // Delete duplicates, keep the newest
+            for (const msg of queueMsgs.slice(1)) {
+                console.log('[discord] Deleting duplicate queue message:', msg.id);
                 await deleteDiscordMessage(msg.id);
             }
+            state.queueMessageId = queueMsgs[0].id;
+            console.log('[discord] Adopted existing queue message:', queueMsgs[0].id);
         }
-        // Always reset so the first poll posts a fresh message
-        state.queueMessageId = null;
         saveState();
     } catch (e) {
-        console.warn('[discord] Could not clean up queue messages:', e.message);
+        console.warn('[discord] Could not recover queue message ID:', e.message);
     }
 }
 
@@ -444,7 +467,7 @@ console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DIS
 
 loadState();
 fetchChannelId().then(async () => {
-    await cleanupOrphanedQueueMessages();
+    await recoverQueueMessageId();
     poll();
     setInterval(poll, POLL_INTERVAL_MS);
 });
