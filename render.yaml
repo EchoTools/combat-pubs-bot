@@ -19,3 +19,11 @@ services:
         value: 10000
       - key: FILTER_GUILD_ID
         sync: false
+      - key: NAKAMA_URL
+        sync: false
+      - key: NAKAMA_HTTP_KEY
+        sync: false
+      - key: NAKAMA_USERNAME
+        sync: false
+      - key: NAKAMA_PASSWORD
+        sync: false

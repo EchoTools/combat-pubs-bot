@@ -14,6 +14,7 @@
 import 'dotenv/config';
 import { WebhookClient, EmbedBuilder } from 'discord.js';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { NakamaSession } from './nakama-auth.js';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -22,8 +23,14 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — e
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
 const STATE_FILE = process.env.STATE_FILE || './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
-// Public status endpoint — no auth required, fallback for queue + active match data
+// Public status endpoint — no auth required, fallback when Nakama auth is unavailable
 const STATUS_URL = 'https://g.echovrce.com/status/matches';
+
+// Nakama authentication (optional — enables authenticated API access)
+const NAKAMA_URL = process.env.NAKAMA_URL || '';
+const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
+const NAKAMA_USERNAME = process.env.NAKAMA_USERNAME || '';
+const NAKAMA_PASSWORD = process.env.NAKAMA_PASSWORD || '';
 
 if (!DISCORD_WEBHOOK_URL) { console.error('[config] DISCORD_WEBHOOK_URL is required'); process.exit(1); }
 
@@ -40,7 +47,7 @@ const WEBHOOK_TOKEN = _webhookParts?.[2] || '';
  *   matchMessages: Record<string, string>  // fullMatchId -> discordMessageId
  * }}
  */
-let state = { queueMessageId: null, matchMessages: {} };
+let state = { queueMessageId: null, matchMessages: {}, nakamaToken: null, nakamaRefreshToken: null };
 
 function loadState() {
     try {
@@ -67,6 +74,37 @@ function saveState() {
         writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
     } catch (e) {
         console.warn('[state] Failed to save state.json:', e.message);
+    }
+}
+
+// ── Nakama session ───────────────────────────────────────────────────────────
+
+/** @type {NakamaSession|null} */
+let nakamaSession = null;
+
+function initNakamaSession() {
+    if (!NAKAMA_URL || !NAKAMA_HTTP_KEY || !NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
+        console.log('[nakama] Auth not configured — using public status endpoint only');
+        return;
+    }
+
+    nakamaSession = new NakamaSession({
+        nakamaUrl: NAKAMA_URL,
+        httpKey: NAKAMA_HTTP_KEY,
+        username: NAKAMA_USERNAME,
+        password: NAKAMA_PASSWORD,
+        onTokensChanged({ token, refreshToken }) {
+            // Persist tokens alongside message IDs so they survive restarts
+            state.nakamaToken = token;
+            state.nakamaRefreshToken = refreshToken;
+            saveState();
+        },
+    });
+
+    // Restore tokens from previous session (avoids re-auth on restart)
+    if (state.nakamaToken || state.nakamaRefreshToken) {
+        nakamaSession.restoreTokens(state.nakamaToken, state.nakamaRefreshToken);
+        console.log('[nakama] Restored session tokens from state.json');
     }
 }
 
@@ -155,13 +193,43 @@ async function deleteDiscordMessage(messageId) {
 
 // ── Nakama API ────────────────────────────────────────────────────────────────
 
-// Public endpoint — no auth required
+/**
+ * Fetch match status via authenticated Nakama RPC.
+ * Uses the match/public RPC which returns the same data as the public status
+ * endpoint but through the authenticated API path.
+ */
+async function fetchAuthenticatedStatus() {
+    if (!nakamaSession) return null;
+    try {
+        await nakamaSession.ensureSession();
+        const data = await nakamaSession.callRpc('match/public');
+        return data;
+    } catch (e) {
+        console.error('[status] Authenticated fetch failed:', e.message);
+        return null;
+    }
+}
+
+/** Public endpoint — no auth required, used as fallback */
 async function fetchPublicStatus() {
     try {
         const res = await fetch(STATUS_URL);
         if (!res.ok) { console.error(`[status] HTTP ${res.status}`); return null; }
         return res.json().catch(() => null);
     } catch (e) { console.error('[status] Fetch error:', e.message); return null; }
+}
+
+/**
+ * Fetch status data. Prefers authenticated API when available,
+ * falls back to public endpoint on failure or when auth is not configured.
+ */
+async function fetchStatus() {
+    if (nakamaSession) {
+        const data = await fetchAuthenticatedStatus();
+        if (data) return data;
+        console.warn('[status] Falling back to public endpoint');
+    }
+    return fetchPublicStatus();
 }
 
 
@@ -367,7 +435,7 @@ async function poll() {
     if (pollRunning) return; // skip if previous poll hasn't finished
     pollRunning = true;
     try {
-        const statusData = await fetchPublicStatus();
+        const statusData = await fetchStatus();
         if (!statusData) return;
 
         // ── Queue count ───────────────────────────────────────────────────────
@@ -461,12 +529,24 @@ async function recoverQueueMessageId() {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 console.log(`[bot] Combat Pubs Bot starting…`);
-console.log(`[bot] Status: ${STATUS_URL}`);
+console.log(`[bot] Status: ${NAKAMA_URL ? `${NAKAMA_URL} (authenticated)` : `${STATUS_URL} (public)`}`);
 console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
 loadState();
+initNakamaSession();
+
 fetchChannelId().then(async () => {
+    // Establish Nakama session before first poll (if configured)
+    if (nakamaSession) {
+        try {
+            await nakamaSession.ensureSession();
+            console.log('[bot] Nakama session established');
+        } catch (e) {
+            console.warn('[bot] Could not establish Nakama session, will use public endpoint:', e.message);
+        }
+    }
+
     await recoverQueueMessageId();
     poll();
     setInterval(poll, POLL_INTERVAL_MS);
