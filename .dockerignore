@@ -1,0 +1,9 @@
+node_modules/
+.env
+state.json
+.git/
+*.bat
+render.yaml
+README.md
+get-discord-token.js
+.env.example
