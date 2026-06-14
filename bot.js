@@ -21,6 +21,7 @@ import { NakamaSession } from './nakama-auth.js';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
+const AUTH_RETRY_COOLDOWN_MS = parseInt(process.env.AUTH_RETRY_COOLDOWN_MS || '300000', 10);
 const STATE_FILE = process.env.STATE_FILE || './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
 // Public status endpoint — no auth required, fallback when Nakama auth is unavailable
@@ -81,6 +82,13 @@ function saveState() {
 
 /** @type {NakamaSession|null} */
 let nakamaSession = null;
+let authRetryAfterMs = 0;
+
+function setAuthRetryCooldown(reason) {
+    authRetryAfterMs = Date.now() + AUTH_RETRY_COOLDOWN_MS;
+    const secs = Math.max(1, Math.floor(AUTH_RETRY_COOLDOWN_MS / 1000));
+    console.warn(`[nakama] Auth disabled for ${secs}s: ${reason}`);
+}
 
 function initNakamaSession() {
     if (!NAKAMA_URL || !NAKAMA_HTTP_KEY || !NAKAMA_USERNAME || !NAKAMA_PASSWORD) {
@@ -206,6 +214,7 @@ async function fetchAuthenticatedStatus() {
         return data;
     } catch (e) {
         console.error('[status] Authenticated fetch failed:', e.message);
+        setAuthRetryCooldown(e.message || 'authenticated fetch failed');
         return null;
     }
 }
@@ -240,12 +249,18 @@ async function fetchPublicStatus() {
  * falls back to public endpoint on failure or when auth is not configured.
  */
 async function fetchStatus() {
-    if (nakamaSession) {
+    if (nakamaSession && Date.now() >= authRetryAfterMs) {
         const data = await fetchAuthenticatedStatus();
-        if (data) return data;
+        if (data) return { statusData: data, usedAuthenticatedPath: true };
         console.warn('[status] Falling back to public endpoint');
+    } else if (nakamaSession && Date.now() < authRetryAfterMs) {
+        const secs = Math.max(1, Math.ceil((authRetryAfterMs - Date.now()) / 1000));
+        console.log(`[status] Auth cooldown active (${secs}s remaining), using public endpoint`);
     }
-    return fetchPublicStatus();
+    return {
+        statusData: await fetchPublicStatus(),
+        usedAuthenticatedPath: false,
+    };
 }
 
 
@@ -481,7 +496,7 @@ async function poll() {
     if (pollRunning) return; // skip if previous poll hasn't finished
     pollRunning = true;
     try {
-        const statusData = await fetchStatus();
+        const { statusData, usedAuthenticatedPath } = await fetchStatus();
         if (!statusData) return;
 
         // ── Queue count ───────────────────────────────────────────────────────
@@ -504,7 +519,9 @@ async function poll() {
             console.log(`[poll] Combat queue: ${queueCount}`);
             lastPoll.tickets = queueCount;
         }
-        const tickets = queueCount > 0 ? await fetchMatchmakerTickets() : null;
+        const tickets = (usedAuthenticatedPath && queueCount > 0)
+            ? await fetchMatchmakerTickets()
+            : null;
         await handleQueueMessage(queueCount, tickets);
 
         // ── Active matches ────────────────────────────────────────────────────
