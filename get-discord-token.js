@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const NAKAMA_URL = (process.env.NAKAMA_URL || 'https://g.echovrce.com:7350/v2').replace(/\/$/, '');
 const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
-const STATE_FILE = './state.json';
+const STATE_FILE = process.env.STATE_FILE || './data/state.json';
 
 if (!NAKAMA_HTTP_KEY) {
     console.error('[error] NAKAMA_HTTP_KEY not set in .env');
@@ -76,10 +76,13 @@ try {
     if (existsSync(STATE_FILE)) savedState = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
 } catch (_) { }
 
-savedState.token = data.token;
-savedState.refreshToken = data.refresh_token;
+savedState.nakamaToken = data.token;
+savedState.nakamaRefreshToken = data.refresh_token;
+// Clean up legacy field names
+delete savedState.token;
+delete savedState.refreshToken;
 delete savedState.discordRefreshToken;
 
 writeFileSync(STATE_FILE, JSON.stringify(savedState, null, 2));
 
-console.log('\nTokens saved to state.json - start the bot now.\n');
+console.log(`\nTokens saved to ${STATE_FILE} — restart the bot to apply.\n`);

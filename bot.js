@@ -539,12 +539,19 @@ initNakamaSession();
 fetchChannelId().then(async () => {
     // Establish Nakama session before first poll (if configured)
     if (nakamaSession) {
-        try {
-            await nakamaSession.ensureSession();
-            console.log('[bot] Nakama session established');
-        } catch (e) {
-            console.warn('[bot] Could not establish Nakama session, will use public endpoint:', e.message);
-            nakamaSession = null;
+        if (state.nakamaToken || state.nakamaRefreshToken) {
+            // We have saved tokens — restore them and skip full auth.
+            // The poll cycle will refresh/retry as needed.
+            console.log('[bot] Nakama session ready (restored from state.json)');
+        } else {
+            // No saved tokens — do a full auth now.
+            try {
+                await nakamaSession.ensureSession();
+                console.log('[bot] Nakama session established');
+            } catch (e) {
+                console.warn('[bot] Could not establish Nakama session, will use public endpoint:', e.message);
+                nakamaSession = null;
+            }
         }
     }
 

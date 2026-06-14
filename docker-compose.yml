@@ -4,7 +4,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - bot-state:/data
+      - ./data:/data
 
-volumes:
-  bot-state:
+volumes: {}
