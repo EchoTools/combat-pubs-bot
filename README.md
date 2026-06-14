@@ -1,5 +1,7 @@
 # Combat Pubs Bot
 
+[![Build, push, and deploy combat-pubs-bot](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml)
+
 A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API and posts live embeds showing:
 
 - **Combat queue** — number of players currently searching for a Combat match
@@ -28,12 +30,12 @@ Copy `.env.example` to `.env` and fill in your values:
 cp .env.example .env
 ```
 
-| Variable | Required | Description |
-|---|---|---|
-| `DISCORD_WEBHOOK_URL` | Yes | Webhook URL for the target channel |
-| `DISCORD_BOT_TOKEN` | Optional | Bot token — enables automatic message pinning |
-| `POLL_INTERVAL_MS` | Optional | Poll frequency in ms (default: `10000`) |
-| `FILTER_GUILD_ID` | Optional | Restrict embeds to one guild/group ID |
+| Variable              | Required | Description                                   |
+| --------------------- | -------- | --------------------------------------------- |
+| `DISCORD_WEBHOOK_URL` | Yes      | Webhook URL for the target channel            |
+| `DISCORD_BOT_TOKEN`   | Optional | Bot token — enables automatic message pinning |
+| `POLL_INTERVAL_MS`    | Optional | Poll frequency in ms (default: `10000`)       |
+| `FILTER_GUILD_ID`     | Optional | Restrict embeds to one guild/group ID         |
 
 #### Creating a Discord webhook
 

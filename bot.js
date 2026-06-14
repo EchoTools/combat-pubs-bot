@@ -45,7 +45,9 @@ const WEBHOOK_TOKEN = _webhookParts?.[2] || '';
 /**
  * @type {{
  *   queueMessageId: string|null,
- *   matchMessages: Record<string, string>  // fullMatchId -> discordMessageId
+ *   matchMessages: Record<string, string>,
+ *   nakamaToken: string|null,
+ *   nakamaRefreshToken: string|null
  * }}
  */
 let state = { queueMessageId: null, matchMessages: {}, nakamaToken: null, nakamaRefreshToken: null };
@@ -209,7 +211,6 @@ async function deleteDiscordMessage(messageId) {
 async function fetchAuthenticatedStatus() {
     if (!nakamaSession) return null;
     try {
-        await nakamaSession.ensureSession();
         const data = await nakamaSession.callRpc('match/public');
         return data;
     } catch (e) {
@@ -593,7 +594,8 @@ async function recoverQueueMessageId() {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 console.log(`[bot] Combat Pubs Bot starting…`);
-console.log(`[bot] Status: ${NAKAMA_URL ? `${NAKAMA_URL} (authenticated)` : `${STATUS_URL} (public)`}`);
+const nakamaConfigured = NAKAMA_URL && NAKAMA_HTTP_KEY && NAKAMA_USERNAME && NAKAMA_PASSWORD;
+console.log(`[bot] Status: ${nakamaConfigured ? `${NAKAMA_URL} (authenticated)` : `${STATUS_URL} (public)`}`);
 console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
 console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
 
