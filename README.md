@@ -7,7 +7,8 @@ A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match s
 - **Combat queue** — number of players currently searching for a Combat match
 - **Active matches** — one pinned embed per live Combat game with team rosters, match time, region, and an [echo.taxi](https://echo.taxi) join link
 
-Embeds are edited in-place across restarts using message IDs persisted to `state.json`. No login or API tokens required.
+Embeds are edited in-place across restarts using message IDs persisted to `state.json`.
+The bot can also optionally authenticate with Nakama for richer queue details if you provide Nakama credentials.
 
 ## Requirements
 
@@ -36,6 +37,12 @@ cp .env.example .env
 | `DISCORD_BOT_TOKEN`   | Optional | Bot token — enables automatic message pinning |
 | `POLL_INTERVAL_MS`    | Optional | Poll frequency in ms (default: `10000`)       |
 | `FILTER_GUILD_ID`     | Optional | Restrict embeds to one guild/group ID         |
+| `NAKAMA_URL`          | Optional | Nakama base URL (no trailing slash, no /v2)   |
+| `NAKAMA_HTTP_KEY`     | Optional | Nakama runtime http key for account RPCs      |
+| `NAKAMA_USERNAME`     | Optional | Bot account username for Nakama auth          |
+| `NAKAMA_PASSWORD`     | Optional | Bot account password for Nakama auth          |
+
+When all four Nakama values are set, the bot authenticates with Nakama and uses the authenticated API path. If auth fails, it automatically falls back to the public endpoint.
 
 #### Creating a Discord webhook
 
@@ -52,6 +59,14 @@ node bot.js
 ```
 
 Or on Windows, double-click `start-bot.bat`.
+
+### 4. Run with Docker
+
+```bash
+docker compose up -d
+```
+
+This uses the local `Dockerfile` and mounts `./data` for persistent `state.json`.
 
 ## Deploying to Render
 

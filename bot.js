@@ -21,7 +21,6 @@ import { NakamaSession } from './nakama-auth.js';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || ''; // optional — enables pinning
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
-const AUTH_RETRY_COOLDOWN_MS = parseInt(process.env.AUTH_RETRY_COOLDOWN_MS || '300000', 10);
 const STATE_FILE = process.env.STATE_FILE || './state.json';
 const FILTER_GUILD_ID = process.env.FILTER_GUILD_ID || '';
 // Public status endpoint — no auth required, fallback when Nakama auth is unavailable
@@ -84,12 +83,12 @@ function saveState() {
 
 /** @type {NakamaSession|null} */
 let nakamaSession = null;
-let authRetryAfterMs = 0;
+let authDisabledPermanently = false;
 
-function setAuthRetryCooldown(reason) {
-    authRetryAfterMs = Date.now() + AUTH_RETRY_COOLDOWN_MS;
-    const secs = Math.max(1, Math.floor(AUTH_RETRY_COOLDOWN_MS / 1000));
-    console.warn(`[nakama] Auth disabled for ${secs}s: ${reason}`);
+function disableAuthPermanently(reason) {
+    authDisabledPermanently = true;
+    nakamaSession = null;
+    console.warn(`[nakama] Auth permanently disabled: ${reason}`);
 }
 
 function initNakamaSession() {
@@ -209,13 +208,18 @@ async function deleteDiscordMessage(messageId) {
  * endpoint but through the authenticated API path.
  */
 async function fetchAuthenticatedStatus() {
-    if (!nakamaSession) return null;
+    if (!nakamaSession || authDisabledPermanently) return null;
     try {
         const data = await nakamaSession.callRpc('match/public');
         return data;
     } catch (e) {
-        console.error('[status] Authenticated fetch failed:', e.message);
-        setAuthRetryCooldown(e.message || 'authenticated fetch failed');
+        const message = e.message || 'authenticated fetch failed';
+        if (/HTTP 401/.test(message)) {
+            disableAuthPermanently(message);
+        } else {
+            console.error('[status] Authenticated fetch failed:', message);
+            disableAuthPermanently(message);
+        }
         return null;
     }
 }
@@ -250,14 +254,21 @@ async function fetchPublicStatus() {
  * falls back to public endpoint on failure or when auth is not configured.
  */
 async function fetchStatus() {
-    if (nakamaSession && Date.now() >= authRetryAfterMs) {
-        const data = await fetchAuthenticatedStatus();
-        if (data) return { statusData: data, usedAuthenticatedPath: true };
-        console.warn('[status] Falling back to public endpoint');
-    } else if (nakamaSession && Date.now() < authRetryAfterMs) {
-        const secs = Math.max(1, Math.ceil((authRetryAfterMs - Date.now()) / 1000));
-        console.log(`[status] Auth cooldown active (${secs}s remaining), using public endpoint`);
+    if (authDisabledPermanently) {
+        return {
+            statusData: await fetchPublicStatus(),
+            usedAuthenticatedPath: false,
+        };
     }
+
+    if (nakamaSession) {
+        const data = await fetchAuthenticatedStatus();
+        if (data) {
+            return { statusData: data, usedAuthenticatedPath: true };
+        }
+        console.warn('[status] Falling back to public endpoint');
+    }
+
     return {
         statusData: await fetchPublicStatus(),
         usedAuthenticatedPath: false,
@@ -606,17 +617,14 @@ fetchChannelId().then(async () => {
     // Establish Nakama session before first poll (if configured)
     if (nakamaSession) {
         if (state.nakamaToken || state.nakamaRefreshToken) {
-            // We have saved tokens — restore them and skip full auth.
-            // The poll cycle will refresh/retry as needed.
             console.log('[bot] Nakama session ready (restored from state.json)');
         } else {
-            // No saved tokens — do a full auth now.
             try {
                 await nakamaSession.ensureSession();
                 console.log('[bot] Nakama session established');
             } catch (e) {
-                console.warn('[bot] Could not establish Nakama session, will use public endpoint:', e.message);
-                nakamaSession = null;
+                disableAuthPermanently(e.message || 'initial authentication failed');
+                console.warn('[bot] Could not establish Nakama session, falling back to public endpoint');
             }
         }
     }
