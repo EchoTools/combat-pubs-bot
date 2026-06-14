@@ -67,7 +67,7 @@ export class NakamaSession {
         if (!username) throw new Error('[nakama-auth] username is required');
         if (!password) throw new Error('[nakama-auth] password is required');
 
-        this._nakamaUrl = nakamaUrl.replace(/\/+$/, '');
+        this._nakamaUrl = nakamaUrl.replace(/\/+$/, '').replace(/\/v2\/?$/, '');
         this._httpKey = httpKey;
         this._username = username;
         this._password = password;
