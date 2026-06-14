@@ -58,9 +58,9 @@ jobs:
     steps:
       - name: Deploy combat-pubs-bot
         env:
-          SSH_HOST: ${{ secrets.COMBAT_PUBS_SSH_HOST }}
-          SSH_USER: ${{ secrets.COMBAT_PUBS_SSH_USER }}
-          DEPLOY_KEY: ${{ secrets.COMBAT_PUBS_DEPLOY_KEY }}
+          SSH_HOST: ${{ vars.DEPLOY_HOST }}
+          SSH_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
