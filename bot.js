@@ -210,6 +210,22 @@ async function fetchAuthenticatedStatus() {
     }
 }
 
+/**
+ * Fetch matchmaker ticket data via authenticated RPC.
+ * Returns an array of combat tickets, or null if unavailable.
+ */
+async function fetchMatchmakerTickets() {
+    if (!nakamaSession) return null;
+    try {
+        const data = await nakamaSession.callRpc('matchmaker/state', {});
+        const tickets = Array.isArray(data?.index) ? data.index : [];
+        return tickets.filter((t) => isCombat(t?.StringProperties?.game_mode));
+    } catch (e) {
+        // Non-fatal — queue embed falls back to count-only
+        return null;
+    }
+}
+
 /** Public endpoint — no auth required, used as fallback */
 async function fetchPublicStatus() {
     try {
@@ -281,13 +297,43 @@ const COMBAT_RED = 0xdc2626;
 const COMBAT_ORANGE = 0xf97316;
 const MATCH_BLUE = 0x3b82f6;
 
-function buildQueueEmbed(playerCount) {
+function formatWaitTime(createdAtNs) {
+    if (!createdAtNs) return '';
+    const secs = Math.floor((Date.now() - createdAtNs / 1e6) / 1000);
+    if (secs < 0) return '';
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${s}s`;
+}
+
+/**
+ * @param {number} playerCount
+ * @param {Array|null} tickets - authenticated ticket data, or null for count-only mode
+ */
+function buildQueueEmbed(playerCount, tickets = null) {
     const embed = new EmbedBuilder()
         .setColor(COMBAT_RED)
         .setTitle('⚔️ Combat Queue')
-        .setDescription(`# ${playerCount}\nplayer${playerCount === 1 ? '' : 's'} searching for a Combat match`)
         .setFooter({ text: 'Last updated' })
         .setTimestamp(new Date());
+
+    if (tickets && tickets.length > 0) {
+        embed.setDescription(`# ${playerCount}\nplayer${playerCount === 1 ? '' : 's'} searching for a Combat match`);
+        const lines = tickets.map((t) => {
+            const name = t?.StringProperties?.display_name
+                || t?.Presences?.[0]?.username
+                || 'Unknown';
+            const wait = formatWaitTime(t?.CreatedAt);
+            const partySize = t?.Presences?.length || 1;
+            const partyStr = partySize > 1 ? ` (+${partySize - 1})` : '';
+            return wait ? `• **${name}**${partyStr} — ${wait}` : `• **${name}**${partyStr}`;
+        }).join('\n');
+        embed.addFields({ name: 'Searching', value: lines.slice(0, 1024) || '—', inline: false });
+    } else {
+        embed.setDescription(`# ${playerCount}\nplayer${playerCount === 1 ? '' : 's'} searching for a Combat match`);
+    }
+
     return embed;
 }
 
@@ -350,7 +396,7 @@ function buildMatchEmbed(game) {
 // Guard against concurrent queue message posts
 let queuePostInProgress = false;
 
-async function handleQueueMessage(playerCount) {
+async function handleQueueMessage(playerCount, tickets = null) {
     if (playerCount === 0) {
         if (state.queueMessageId) {
             await deleteDiscordMessage(state.queueMessageId);
@@ -360,7 +406,7 @@ async function handleQueueMessage(playerCount) {
         return;
     }
 
-    const embed = buildQueueEmbed(playerCount);
+    const embed = buildQueueEmbed(playerCount, tickets);
     try {
         if (state.queueMessageId) {
             await webhook.editMessage(state.queueMessageId, { embeds: [embed] });
@@ -458,7 +504,8 @@ async function poll() {
             console.log(`[poll] Combat queue: ${queueCount}`);
             lastPoll.tickets = queueCount;
         }
-        await handleQueueMessage(queueCount);
+        const tickets = queueCount > 0 ? await fetchMatchmakerTickets() : null;
+        await handleQueueMessage(queueCount, tickets);
 
         // ── Active matches ────────────────────────────────────────────────────
         if (statusData?.labels) {
