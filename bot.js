@@ -544,6 +544,7 @@ fetchChannelId().then(async () => {
             console.log('[bot] Nakama session established');
         } catch (e) {
             console.warn('[bot] Could not establish Nakama session, will use public endpoint:', e.message);
+            nakamaSession = null;
         }
     }
 
