@@ -397,6 +397,27 @@ function buildMatchEmbed(game) {
     if (mapName) infoLines.push(`**Map:** ${mapName}`);
     const region = label?.broadcaster?.region;
     if (region) infoLines.push(`**Region:** ${region}`);
+
+    // Add payload fields if available (distance, checkpoint, scores)
+    const payload = label?.payload;
+    if (payload != null) {
+        const payloadLines = [];
+        if (payload.distance != null) payloadLines.push(`**Distance:** ${payload.distance.toFixed(2)}`);
+        if (payload.checkpoint != null) payloadLines.push(`**Checkpoint:** ${payload.checkpoint}`);
+
+        // Capture Point scores
+        if (payload.blue_points != null || payload.orange_points != null) {
+            const blueScore = payload.blue_points ?? 0;
+            const orangeScore = payload.orange_points ?? 0;
+            const round = (payload.total_round_count ?? 0) + 1;
+            payloadLines.push(`**Score:** 🔵 ${blueScore} - 🟠 ${orangeScore} (Round ${round})`);
+        }
+
+        if (payloadLines.length > 0) {
+            infoLines.push(payloadLines.join('\n'));
+        }
+    }
+
     embed.addFields({ name: 'Match Info', value: infoLines.join('\n'), inline: false });
 
     if (blueTeam.length > 0) embed.addFields({
