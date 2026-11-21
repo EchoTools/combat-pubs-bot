@@ -71,14 +71,21 @@ jobs:
 
       - name: Notify Discord
         if: success()
+        # A notification problem must never mark a successful deploy as failed.
+        continue-on-error: true
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::notice::DISCORD_DEPLOY_WEBHOOK secret is not set — skipping deploy notification"
+            exit 0
+          fi
           SHORT_SHA=$(echo "$COMMIT_SHA" | cut -c1-7)
+          DESC=$(printf 'combat-pubs-bot deployed and running\n[`%s`](https://github.com/%s/commit/%s)' "$SHORT_SHA" "$GITHUB_REPOSITORY" "$COMMIT_SHA")
           PAYLOAD=$(jq -n \
-            --arg desc "combat-pubs-bot deployed and running\n[\`$SHORT_SHA\`](https://github.com/$GITHUB_REPOSITORY/commit/$COMMIT_SHA)" \
+            --arg desc "$DESC" \
             '{
               embeds: [{
                 title: "combat-pubs-bot deployed",

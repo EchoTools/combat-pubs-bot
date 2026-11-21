@@ -48,6 +48,15 @@ const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
 const NAKAMA_USERNAME = process.env.NAKAMA_USERNAME || '';
 const NAKAMA_PASSWORD = process.env.NAKAMA_PASSWORD || '';
 
+// Next-match reactions: players react to a match message and the bot sets that
+// match as their next match via the player/setnextmatch RPC.
+// On by default; it only actually activates when DISCORD_BOT_TOKEN and all
+// NAKAMA_* values are set. The bot's Nakama account must be a Global Operator
+// (the RPC only lets operators target other users). NEXT_MATCH_ENABLED=false
+// turns it off.
+const NEXT_MATCH_ENABLED = parseBool(process.env.NEXT_MATCH_ENABLED, true);
+export const NEXT_MATCH_EMOJI = '⏭️';
+
 // Any single HTTP call that takes longer than this is abandoned, so one hung
 // request can never freeze the poll loop (Node's fetch has no default timeout).
 const HTTP_TIMEOUT_MS = 8_000;
@@ -58,6 +67,13 @@ const HEARTBEAT_MS = 60_000;
 const _webhookParts = DISCORD_WEBHOOK_URL.match(/webhooks\/(\d+)\/([^/?]+)/);
 const WEBHOOK_ID = _webhookParts?.[1] || '';
 const WEBHOOK_TOKEN = _webhookParts?.[2] || '';
+
+/** true/false from an env value; unset or blank → `fallback`, unrecognised → false. */
+export function parseBool(raw, fallback = false) {
+    const v = String(raw ?? '').trim();
+    if (v === '') return fallback;
+    return /^(1|true|yes|on)$/i.test(v);
+}
 
 export function parsePollInterval(raw) {
     if (raw == null || raw === '') return DEFAULT_POLL_INTERVAL_MS;
@@ -192,10 +208,14 @@ function saveState() {
 let nakamaSession = null;
 let authDisabledPermanently = false;
 
+/**
+ * Stop using the authenticated *status* path (match/public, matchmaker/state)
+ * and fall back to the public endpoint. The session itself is kept: the
+ * next-match feature uses a different RPC and retries auth on each use.
+ */
 function disableAuthPermanently(reason) {
     authDisabledPermanently = true;
-    nakamaSession = null;
-    console.warn(`[nakama] Auth permanently disabled: ${reason}`);
+    console.warn(`[nakama] Authenticated status path disabled: ${reason}`);
 }
 
 function initNakamaSession() {
@@ -351,7 +371,7 @@ async function fetchAuthenticatedStatus() {
  * Returns an array of combat tickets, or null if unavailable.
  */
 async function fetchMatchmakerTickets() {
-    if (!nakamaSession) return null;
+    if (!nakamaSession || authDisabledPermanently) return null;
     try {
         const data = await nakamaSession.callRpc('matchmaker/state', {});
         const tickets = Array.isArray(data?.index) ? data.index : [];
@@ -584,9 +604,10 @@ export function buildQueueMessage(playerCount, tickets = null, { activeMatches =
 
 /**
  * @param {object} label - one entry of statusData.labels
- * @param {{ updatedAt?: number }} [opts]
+ * @param {{ updatedAt?: number, nextMatchHint?: boolean }} [opts]
+ *   nextMatchHint — show the "react to join next" line (next-match feature active)
  */
-export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
+export function buildMatchMessage(label, { updatedAt = Date.now(), nextMatchHint = false } = {}) {
     const players = Array.isArray(label?.players) ? label.players.filter((p) => p && typeof p === 'object') : [];
     const blueTeam = players.filter((p) => normalizeTeam(p) === 'blue');
     const orangeTeam = players.filter((p) => normalizeTeam(p) === 'orange');
@@ -649,6 +670,9 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
     if (payload?.checkpoint != null && ['string', 'number'].includes(typeof payload.checkpoint)) {
         lines.push(`🚩 Checkpoint **${escapeMarkdown(String(payload.checkpoint))}**`);
     }
+    if (nextMatchHint && UUID_RE.test(matchUuid)) {
+        lines.push(`${NEXT_MATCH_EMOJI} React ${NEXT_MATCH_EMOJI} to make this your next match`);
+    }
 
     const embed = new EmbedBuilder()
         .setColor(accent)
@@ -680,7 +704,7 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
     const signature = JSON.stringify({ content, embed: embed.toJSON() });
     embed.setDescription(`${lines.join('\n')}\n-# updated ${discordTime(updatedAt)}`.slice(0, 4096));
 
-    return { embed, content, signature, fullMatchId };
+    return { embed, content, signature, fullMatchId, mapName };
 }
 
 // ── Startup recovery helpers ──────────────────────────────────────────────────
@@ -842,6 +866,176 @@ async function handleAllMatchMessages(builtMatches, now) {
     }
 }
 
+// ── Next-match reactions ──────────────────────────────────────────────────────
+//
+// Players react ⏭️ on a match message. Each poll the bot reads those reactions
+// over REST (no gateway), sets that match as the reactor's next match via the
+// player/setnextmatch RPC, removes the reaction as an acknowledgement and DMs
+// the result. Same effect as EchoVRCE's /next-match (directive only, no
+// immediate join).
+//
+// SAFETY: the target is always the reacting user's *own* Discord ID. The bot's
+// Global Operator privilege is never used to move anyone who didn't ask.
+
+const NEXT_MATCH_EMOJI_PATH = encodeURIComponent(NEXT_MATCH_EMOJI);
+const NEXT_MATCH_COOLDOWN_MS = 30_000; // per user per message, stops reaction spam → RPC/DM spam
+let botUserId = null; // Discord user ID behind DISCORD_BOT_TOKEN
+let botNakamaUserId = null; // Nakama user ID of the bot account
+const seededReactions = new Set(); // message IDs we've added our own ⏭️ to
+/** `${messageId}:${userId}` → time handled (Infinity = reaction couldn't be removed; never re-run) */
+const handledReactions = new Map();
+
+function nextMatchActive() {
+    return NEXT_MATCH_ENABLED && !!nakamaSession && !!DISCORD_BOT_TOKEN && !!channelId && !!botUserId;
+}
+
+async function discordBotApi(method, path, body) {
+    const headers = botHeaders();
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const res = await fetch(`https://discord.com/api/v10${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: timeoutSignal(),
+    });
+    if (res.status === 429) {
+        const data = await res.json().catch(() => ({}));
+        const err = new Error(`rate limited (retry after ${data.retry_after ?? '?'}s)`);
+        err.rateLimited = true;
+        throw err;
+    }
+    return res;
+}
+
+/**
+ * Interpret a player/setnextmatch response. If the Discord ID isn't linked to
+ * an EchoVRCE account, the server silently falls back to targeting the
+ * *caller* (the bot) and still succeeds — that must be reported as
+ * "not-linked", never as success.
+ * @returns {'ok'|'not-linked'|'error'}
+ */
+export function classifySetNextMatchResult(response, selfNakamaUserId) {
+    const target = response?.user_id;
+    if (!target || typeof target !== 'string' || !selfNakamaUserId) return 'error';
+    return target === selfNakamaUserId ? 'not-linked' : 'ok';
+}
+
+/** Classify a thrown player/setnextmatch error. */
+export function classifySetNextMatchError(message) {
+    return /HTTP 404/.test(String(message)) ? 'ended' : 'error';
+}
+
+/** DM text for each outcome. */
+export function nextMatchReply(outcome, { mapName, fullMatchId } = {}) {
+    const shortId = String(fullMatchId || '').split('.')[0];
+    switch (outcome) {
+        case 'ok':
+            return `${NEXT_MATCH_EMOJI} Your next match is set to the Combat match on **${mapName || 'unknown map'}** (\`${shortId}\`).`;
+        case 'not-linked':
+            return "Couldn't set your next match: your Discord account isn't linked to an EchoVRCE account.";
+        case 'ended':
+            return "Couldn't set your next match: that match has already ended.";
+        default:
+            return "Couldn't set your next match right now. Try again in a moment, or use `/next-match`.";
+    }
+}
+
+async function resolveBotUserId() {
+    try {
+        const res = await discordBotApi('GET', '/users/@me');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        botUserId = (await res.json())?.id || null;
+    } catch (e) {
+        console.warn('[next-match] Could not look up the Discord bot user:', e.message);
+    }
+    return botUserId;
+}
+
+async function resolveBotNakamaUserId() {
+    try {
+        const res = await nakamaSession.fetch('/v2/account', { signal: timeoutSignal() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        botNakamaUserId = (await res.json())?.user?.id || null;
+        if (botNakamaUserId) console.log('[next-match] Bot Nakama account resolved');
+    } catch (e) {
+        console.warn('[next-match] Could not look up the bot Nakama account:', e.message);
+    }
+    return botNakamaUserId;
+}
+
+async function setNextMatchFor(discordId, fullMatchId) {
+    try {
+        const resp = await nakamaSession.callRpc(
+            'player/setnextmatch',
+            { discord_id: discordId, match_id: fullMatchId, join_immediately: false },
+            { signal: timeoutSignal() },
+        );
+        return classifySetNextMatchResult(resp, botNakamaUserId);
+    } catch (e) {
+        console.warn(`[next-match] setnextmatch failed for ${discordId}:`, e.message);
+        return classifySetNextMatchError(e.message);
+    }
+}
+
+async function dmUser(userId, content) {
+    try {
+        const ch = await discordBotApi('POST', '/users/@me/channels', { recipient_id: userId });
+        if (!ch.ok) return;
+        const { id } = await ch.json();
+        await discordBotApi('POST', `/channels/${id}/messages`, { content, allowed_mentions: { parse: [] } });
+    } catch (_) {
+        // DMs closed or rate limited — the removed reaction is still feedback
+    }
+}
+
+async function processNextMatchReactions(builtMatches, now) {
+    if (!nextMatchActive()) return;
+    if (!botNakamaUserId && !(await resolveBotNakamaUserId())) return; // can't detect "not linked" safely
+
+    const liveMessages = new Set(Object.values(state.matchMessages));
+    for (const [key, at] of handledReactions) {
+        if (!liveMessages.has(key.split(':')[0]) || now - at > NEXT_MATCH_COOLDOWN_MS) handledReactions.delete(key);
+    }
+
+    for (const { fullMatchId, mapName } of builtMatches) {
+        const msgId = state.matchMessages[fullMatchId];
+        if (!msgId || !UUID_RE.test(fullMatchId.split('.')[0])) continue;
+        const base = `/channels/${channelId}/messages/${msgId}/reactions/${NEXT_MATCH_EMOJI_PATH}`;
+        try {
+            if (!seededReactions.has(msgId)) {
+                const seeded = await discordBotApi('PUT', `${base}/@me`);
+                if (seeded.ok) seededReactions.add(msgId);
+            }
+            const res = await discordBotApi('GET', `${base}?limit=100`);
+            if (!res.ok) continue;
+            const users = await res.json().catch(() => []);
+            if (!Array.isArray(users)) continue;
+
+            for (const user of users) {
+                if (!user?.id || user.id === botUserId || user.bot) continue;
+                const key = `${msgId}:${user.id}`;
+                if (!handledReactions.has(key)) {
+                    handledReactions.set(key, now);
+                    const outcome = await setNextMatchFor(user.id, fullMatchId);
+                    console.log(`[next-match] ${user.id} → ${fullMatchId.slice(0, 8)}: ${outcome}`);
+                    await dmUser(user.id, nextMatchReply(outcome, { mapName, fullMatchId }));
+                } else if (handledReactions.get(key) === Infinity) {
+                    continue; // already handled; we just can't remove their reaction
+                }
+                const removed = await discordBotApi('DELETE', `${base}/${user.id}`);
+                if (!removed.ok) {
+                    // Without Manage Messages the reaction stays; never re-run (no repeat DMs).
+                    handledReactions.set(key, Infinity);
+                    console.warn(`[next-match] Could not remove reaction (HTTP ${removed.status}) — does the bot have Manage Messages?`);
+                }
+            }
+        } catch (e) {
+            console.warn(`[next-match] Reaction check failed for ${fullMatchId.slice(0, 8)}:`, e.message);
+            if (e.rateLimited) return; // try again next poll
+        }
+    }
+}
+
 // ── Main poll loop ────────────────────────────────────────────────────────────
 
 const lastPoll = { tickets: -1, games: -1 };
@@ -873,7 +1067,7 @@ async function poll() {
         const builtMatches = [];
         for (const label of combatLabels) {
             try {
-                builtMatches.push(buildMatchMessage(label, { updatedAt: now }));
+                builtMatches.push(buildMatchMessage(label, { updatedAt: now, nextMatchHint: nextMatchActive() }));
             } catch (e) {
                 // One odd label must not stop every other message from updating
                 console.error(`[poll] Could not build message for match ${String(label.id).slice(0, 8)}:`, e.message);
@@ -898,7 +1092,10 @@ async function poll() {
 
         // Only reconcile match messages when the payload actually had a labels
         // array — a partial response must not delete every live match message.
-        if (hasLabels) await handleAllMatchMessages(builtMatches, now);
+        if (hasLabels) {
+            await handleAllMatchMessages(builtMatches, now);
+            await processNextMatchReactions(builtMatches, now);
+        }
     } catch (e) {
         console.error('[poll] Unhandled error:', e.message);
     } finally {
@@ -1037,7 +1234,7 @@ async function main() {
 
     if (legacyIds.length) {
         for (const id of legacyIds) await deleteDiscordMessage(id);
-        saveState(); // persist format: 2 so this only happens once
+        saveState(); // persist the new format so this only happens once
     }
 
     // Establish Nakama session before first poll (if configured)
@@ -1053,6 +1250,19 @@ async function main() {
                 console.warn('[bot] Could not establish Nakama session, falling back to public endpoint');
             }
         }
+    }
+
+    if (NEXT_MATCH_ENABLED) {
+        const missing = [];
+        if (!DISCORD_BOT_TOKEN) missing.push('DISCORD_BOT_TOKEN');
+        if (!nakamaSession) missing.push('NAKAMA_URL / NAKAMA_HTTP_KEY / NAKAMA_USERNAME / NAKAMA_PASSWORD');
+        if (!channelId) missing.push('a resolvable webhook channel');
+        if (!missing.length && !(await resolveBotUserId())) missing.push('a valid DISCORD_BOT_TOKEN');
+        console.log(missing.length
+            ? `[bot] Next-match reactions: disabled — missing ${missing.join(', ')}`
+            : `[bot] Next-match reactions: enabled (${NEXT_MATCH_EMOJI})`);
+    } else {
+        console.log('[bot] Next-match reactions: turned off (NEXT_MATCH_ENABLED=false)');
     }
 
     await recoverMessages();

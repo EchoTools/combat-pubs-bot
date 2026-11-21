@@ -14,6 +14,11 @@ import {
     extractComponentText,
     safePlayerName,
     formatClock,
+    parseBool,
+    classifySetNextMatchResult,
+    classifySetNextMatchError,
+    nextMatchReply,
+    NEXT_MATCH_EMOJI,
 } from '../bot.js';
 
 const UUID = '93e2d27b-791f-4050-912e-d14cc7ab2bba';
@@ -305,4 +310,62 @@ test('recovery flags legacy embed messages and ignores unrelated ones', () => {
     assert.equal(classifyOwnMessage({ flags: MessageFlags.IsComponentsV2, components: [{ type: 10, content: 'hi' }] }), null);
     assert.equal(classifyOwnMessage(null), null);
     assert.equal(classifyOwnMessage({ flags: MessageFlags.IsComponentsV2, components: 'bad' }), null);
+});
+
+// ── Next-match reactions ─────────────────────────────────────────────────────
+
+const BOT_NAKAMA_ID = '11111111-1111-1111-1111-111111111111';
+const PLAYER_NAKAMA_ID = '22222222-2222-2222-2222-222222222222';
+
+test('NEXT_MATCH_ENABLED parsing is opt-in', () => {
+    for (const v of ['1', 'true', 'TRUE', 'yes', 'on', ' true ']) assert.equal(parseBool(v), true, v);
+    for (const v of [undefined, null, '', '0', 'false', 'no', 'off', 'nope']) assert.equal(parseBool(v), false, String(v));
+});
+
+test('setnextmatch success targets the player', () => {
+    assert.equal(classifySetNextMatchResult({ user_id: PLAYER_NAKAMA_ID, match_id: FULL_ID }, BOT_NAKAMA_ID), 'ok');
+});
+
+test('unlinked Discord account (server fell back to the bot itself) is not reported as success', () => {
+    assert.equal(classifySetNextMatchResult({ user_id: BOT_NAKAMA_ID, match_id: FULL_ID }, BOT_NAKAMA_ID), 'not-linked');
+});
+
+test('malformed setnextmatch responses, or an unknown bot ID, are errors', () => {
+    for (const resp of [null, undefined, {}, { user_id: 7 }, { user_id: '' }, 'ok', []]) {
+        assert.equal(classifySetNextMatchResult(resp, BOT_NAKAMA_ID), 'error', JSON.stringify(resp));
+    }
+    assert.equal(classifySetNextMatchResult({ user_id: PLAYER_NAKAMA_ID }, null), 'error', 'cannot verify without bot ID');
+});
+
+test('setnextmatch errors: 404 means the match ended, anything else is generic', () => {
+    assert.equal(classifySetNextMatchError('[nakama-auth] RPC player/setnextmatch failed: HTTP 404 {"message":"Match not found"}'), 'ended');
+    assert.equal(classifySetNextMatchError('[nakama-auth] RPC player/setnextmatch failed: HTTP 403 permission denied'), 'error');
+    assert.equal(classifySetNextMatchError('This operation was aborted'), 'error');
+    assert.equal(classifySetNextMatchError(undefined), 'error');
+});
+
+test('next-match DM text for each outcome', () => {
+    assert.equal(nextMatchReply('ok', { mapName: 'Dyson', fullMatchId: FULL_ID }),
+        `${NEXT_MATCH_EMOJI} Your next match is set to the Combat match on **Dyson** (\`${UUID}\`).`);
+    assert.match(nextMatchReply('not-linked'), /isn't linked to an EchoVRCE account/);
+    assert.match(nextMatchReply('ended'), /already ended/);
+    assert.match(nextMatchReply('error'), /\/next-match/);
+    assert.match(nextMatchReply('ok'), /unknown map/);
+});
+
+test('match embed shows the react hint only when the feature is active and the match ID is valid', () => {
+    const hint = new RegExp(`React ${NEXT_MATCH_EMOJI} to make this your next match`);
+    assert.doesNotMatch(buildMatchMessage(label()).embed.toJSON().description, hint);
+    assert.match(buildMatchMessage(label(), { nextMatchHint: true }).embed.toJSON().description, hint);
+    assert.doesNotMatch(buildMatchMessage(label({ id: 'bad' }), { nextMatchHint: true }).embed.toJSON().description, hint);
+    assert.equal(buildMatchMessage(label()).mapName, 'Dyson');
+});
+
+test('next-match is on by default: unset/blank use the fallback, explicit values win', () => {
+    assert.equal(parseBool(undefined, true), true);
+    assert.equal(parseBool('', true), true);
+    assert.equal(parseBool('  ', true), true);
+    assert.equal(parseBool('false', true), false);
+    assert.equal(parseBool('0', true), false);
+    assert.equal(parseBool('true', true), true);
 });

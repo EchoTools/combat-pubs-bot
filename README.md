@@ -41,6 +41,7 @@ cp .env.example .env
 | `NAKAMA_HTTP_KEY`     | Optional | Nakama runtime http key for account RPCs      |
 | `NAKAMA_USERNAME`     | Optional | Bot account username for Nakama auth          |
 | `NAKAMA_PASSWORD`     | Optional | Bot account password for Nakama auth          |
+| `NEXT_MATCH_ENABLED`  | Optional | ⏭️ next-match reactions (default `true`; `false` turns them off) |
 
 When all four Nakama values are set, the bot authenticates with Nakama and uses the authenticated API path. If auth fails, it automatically falls back to the public endpoint.
 
@@ -51,6 +52,18 @@ In your Discord channel: **Settings → Integrations → Webhooks → New Webhoo
 #### Enabling auto-pinning (optional)
 
 Create a bot at [discord.com/developers/applications](https://discord.com/developers/applications), invite it to your server with the **Manage Messages** permission, and set `DISCORD_BOT_TOKEN`.
+
+#### Next-match reactions
+
+Players react ⏭️ on a match message and the bot sets that match as their next match — the same as EchoVRCE's `/next-match` command. Their reaction is removed within one poll (≤10s) and they get a DM with the result (e.g. if their Discord isn't linked to EchoVRCE).
+
+Requirements:
+
+1. `DISCORD_BOT_TOKEN` with **Manage Messages**, **Add Reactions** and **Read Message History** in the channel
+2. All four `NAKAMA_*` values, for a Nakama account that is a **Global Operator** (the `player/setnextmatch` RPC only lets operators set another user's next match)
+3. `NEXT_MATCH_ENABLED` left unset or `true` (it is on by default; set `false` to turn it off)
+
+The startup log says `Next-match reactions: enabled` or lists what's missing. The bot only ever sets the next match of the person who reacted.
 
 ### 3. Run the bot
 

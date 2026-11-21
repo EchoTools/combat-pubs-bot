@@ -159,12 +159,14 @@ export class NakamaSession {
      * Call a Nakama RPC (authenticated).
      * @param {string} rpcId  - RPC endpoint ID (e.g. "match/public")
      * @param {object} [body] - Request payload
+     * @param {{ signal?: AbortSignal }} [opts] - e.g. AbortSignal.timeout(ms)
      * @returns {Promise<object>} Parsed JSON response
      */
-    async callRpc(rpcId, body = {}) {
+    async callRpc(rpcId, body = {}, { signal } = {}) {
         const res = await this.fetch(`/v2/rpc/${rpcId}?unwrap`, {
             method: 'POST',
             body: JSON.stringify(body),
+            signal,
         });
         if (!res.ok) {
             const text = await res.text().catch(() => '');

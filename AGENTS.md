@@ -30,13 +30,13 @@ anywhere
 
 - **Not a Discord gateway bot.** It does not use the Discord gateway, does
   not listen to messages, does not respond to commands. It is a
-  poll-and-post webhook client. The optional bot token is used exclusively
-  for pinning messages and deleting pin system notifications — not for
-  gateway features.
-- **Not a Nakama client.** Earlier versions used the Nakama RPC API with
-  authentication tokens. The current version uses only the public
-  unauthenticated status endpoint. `get-discord-token.js` and
-  `setup-token.bat` are legacy artifacts from the authenticated API era.
+  poll-and-post webhook client. The optional bot token is used over REST
+  only: pinning, deleting pin system notifications, startup recovery, and
+  (when enabled) next-match reactions — not for gateway features.
+- **Nakama is optional.** By default the bot uses only the public
+  unauthenticated status endpoint. With `NAKAMA_*` set it can also use the
+  authenticated status RPCs and the next-match feature.
+  `get-discord-token.js` and `setup-token.bat` are legacy artifacts.
 - **Not part of Metis core infrastructure.** It does not touch Logos, the
   Privacy Gate, the Write Router, or any memory substrates. The Metis
   non-negotiable constraints (NC-1 through NC-7) do not apply directly.
@@ -100,14 +100,24 @@ anywhere
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.
+- **Never use the bot's operator privilege on anyone but the person who
+  asked.** Next-match reactions (`NEXT_MATCH_ENABLED`, approved by the
+  project owner 2026-11-21) call `player/setnextmatch`, which only lets
+  Global Operators target other users — and the bot's Nakama account is one.
+  The target MUST always be the reacting user's own Discord ID and the match
+  MUST be the one the message is for. If the Discord ID isn't linked, the
+  server silently targets the caller (the bot) and returns success; that
+  case must stay detected and reported as "not linked"
+  (`classifySetNextMatchResult`).
 
 ## Common Mistakes
 
-**Adding Nakama authentication back.** The bot was simplified to use the
-public status endpoint. The `get-discord-token.js` and `setup-token.bat`
-files are legacy. Do not build new features on the authenticated Nakama API
-without explicit approval — the public endpoint is sufficient for queue
-counts and active match data.
+**Making Nakama required.** The public status endpoint is sufficient for
+queue counts and active match data; the bot must keep working with no
+`NAKAMA_*` values set. Authenticated features (currently: next-match
+reactions) stay optional: they only activate when the `NAKAMA_*` values
+are set. Do not add more without
+explicit approval. `get-discord-token.js` and `setup-token.bat` are legacy.
 
 **Over-engineering the single-file structure.** The bot is 470 lines in one
 file. That is appropriate for its complexity. Do not split it into
@@ -192,10 +202,12 @@ in local dev, injected by Render in production).
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_WEBHOOK_URL` | Yes | — | Webhook URL for the target channel |
-| `DISCORD_BOT_TOKEN` | No | — | Bot token for auto-pinning (Manage Messages permission) |
-| `POLL_INTERVAL_MS` | No | `10000` | Poll frequency in milliseconds |
+| `DISCORD_BOT_TOKEN` | No | — | Bot token for auto-pinning, recovery, next-match reactions (Manage Messages, Add Reactions, Read Message History) |
+| `POLL_INTERVAL_MS` | No | `10000` | Poll frequency in milliseconds (min `5000`) |
 | `STATE_FILE` | No | `./state.json` | Path to the message ID persistence file |
 | `FILTER_GUILD_ID` | No | — | Restrict embeds to one guild/group ID |
+| `NAKAMA_URL` / `NAKAMA_HTTP_KEY` / `NAKAMA_USERNAME` / `NAKAMA_PASSWORD` | No | — | Bot's Nakama account (authenticated status path, next-match) |
+| `NEXT_MATCH_ENABLED` | No | `true` | ⏭️ reactions set the reactor's next match; needs bot token + `NAKAMA_*` + Global Operator account |
 
 ### Note on environment variables
 
@@ -204,7 +216,7 @@ predates the ecosystem's config-from-files standard
 ([GENERIC-PROJECT-ADDENDUM.md](/srv/src/metis-core/GENERIC-PROJECT-ADDENDUM.md)).
 The env-var pattern is acceptable here because (a) the Render deployment
 platform injects config as environment variables, and (b) the bot has only
-five configuration values, all validated at startup. If the configuration
+a handful of configuration values, all validated at startup. If the configuration
 grows beyond this, migrate to a config file with env-var override as the
 platform adaptation layer.
 
