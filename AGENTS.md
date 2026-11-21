@@ -4,19 +4,19 @@
 
 A Discord bot for the [EchoVRCE](https://echovrce.com) community. It polls
 the public match status API at `https://g.echovrce.com/status/matches` on a
-configurable interval (default 10s) and posts live Discord messages showing:
+configurable interval (default 10s) and posts live Discord **Components V2**
+messages (containers, text displays, separators) showing:
 
-- How many players are currently queued for Combat matchmaking — a
-  **Components V2** message (container, text displays, separators). It is
-  deleted when nobody is queued and posted fresh (at the bottom of the
-  channel) when someone queues again.
-- One pinned **embed** per active public Combat match — score, clock, map,
-  region, team rosters — with the [echo.taxi](https://echo.taxi) join link as
-  raw text in the message content, outside the embed (see below for why).
+- How many players are currently queued for Combat matchmaking. The queue
+  message is deleted when nobody is queued and posted fresh (at the bottom of
+  the channel) when someone queues again.
+- One pinned message per active public Combat match — score, clock, map,
+  region, team rosters — with an [echo.taxi](https://echo.taxi) join link
+  that @mentions EchoTaxi (see below for why).
 
 Messages are edited in-place (not re-posted) and survive restarts via message
-IDs persisted to `state.json` (`format: 3`; messages from older formats are
-deleted and re-posted once on upgrade). The bot uses a Discord webhook for
+IDs persisted to `state.json` (`format: 4`; embed-era messages from older
+formats are deleted and re-posted once on upgrade). The bot uses a Discord webhook for
 posting/editing and an optional bot token for auto-pinning and cleanup.
 
 **Language:** JavaScript (Node.js, ES modules)
@@ -91,12 +91,17 @@ anywhere
   A plain channel webhook can only send non-interactive components
   (`withComponents: true`), and handling interactions needs an
   application/gateway.
-- **Never move the echo.taxi join link out of the message content.** It
-  must stay a raw, clickable `https://echo.taxi/...` URL in the message
-  `content`, outside the embed — not a button, masked link, embed field, or
-  V2 text display. Another bot reads message content, detects the link, and
-  reacts with 🚕 so players can haul a join request. This is also why match
-  messages are embeds, not Components V2: V2 messages cannot have content.
+- **Never turn the echo.taxi join link into a button or masked link, or drop
+  the EchoTaxi mention.** The join line is its own text display:
+  `<@ECHOTAXI_BOT_ID> 🚕 **Join:** https://echo.taxi/spark://c/<uuid>`.
+  EchoTaxi detects the raw URL and reacts 🚕 so players can haul a join
+  request. While Discord has EchoTaxi's message-content access suspended it
+  only sees messages that @mention it, so `ECHOTAXI_BOT_ID` (defaults to
+  `1208822908089278564`; `off` disables) must stay in the join line and in
+  `allowedMentions.users` — a suppressed mention doesn't count as a mention.
+  If EchoTaxi turns out not to read V2 component text, match messages must
+  go back to an embed with the link in message `content` (state format 3,
+  see git history).
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.
@@ -112,7 +117,7 @@ counts and active match data.
 **Over-engineering the single-file structure.** The bot is 470 lines in one
 file. That is appropriate for its complexity. Do not split it into
 modules/classes/layers unless the functionality genuinely warrants it. A
-poll loop, some API calls, and some embed builders do not need an
+poll loop, some API calls, and some message builders do not need an
 architecture.
 
 **Ignoring Discord rate limits.** The Discord API rate-limits webhook
@@ -131,7 +136,7 @@ The check should remain inclusive (substring match) not exclusive
 
 ```
 bot.js                  # The entire bot — poll loop, Discord webhook,
-                        #   embed builders, state management
+                        #   V2 message builders, state management
 package.json            # Node.js project config, dependencies
 package-lock.json       # Pinned dependency versions (committed)
 .env.example            # Configuration template with documentation
@@ -195,7 +200,8 @@ in local dev, injected by Render in production).
 | `DISCORD_BOT_TOKEN` | No | — | Bot token for auto-pinning (Manage Messages permission) |
 | `POLL_INTERVAL_MS` | No | `10000` | Poll frequency in milliseconds |
 | `STATE_FILE` | No | `./state.json` | Path to the message ID persistence file |
-| `FILTER_GUILD_ID` | No | — | Restrict embeds to one guild/group ID |
+| `FILTER_GUILD_ID` | No | — | Restrict messages to one guild/group ID |
+| `ECHOTAXI_BOT_ID` | No | `1208822908089278564` | EchoTaxi's user ID, @mentioned in each join line so it can see the link; `off` disables |
 
 ### Note on environment variables
 

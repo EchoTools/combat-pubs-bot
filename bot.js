@@ -2,10 +2,10 @@
  * Combat Pubs Discord Bot
  *
  * Polls the EchoVRCE match status endpoint every POLL_INTERVAL_MS (default
- * 10s) and posts/edits Discord messages showing:
- *   - How many players are currently queued for Combat (Components V2)
- *   - One pinned message per active public Combat match (embed, with the
- *     echo.taxi join link in the message content — see buildMatchMessage)
+ * 10s) and posts/edits Discord Components V2 messages showing:
+ *   - How many players are currently queued for Combat
+ *   - One pinned message per active public Combat match, with an echo.taxi
+ *     join link that @mentions EchoTaxi (see buildMatchMessage)
  *
  * Uses a Discord webhook for posting/editing (with_components=true, so the
  * non-interactive V2 components — containers, text displays, separators —
@@ -17,7 +17,6 @@
 import 'dotenv/config';
 import {
     WebhookClient,
-    EmbedBuilder,
     ContainerBuilder,
     TextDisplayBuilder,
     SeparatorBuilder,
@@ -48,6 +47,14 @@ const NAKAMA_HTTP_KEY = process.env.NAKAMA_HTTP_KEY || '';
 const NAKAMA_USERNAME = process.env.NAKAMA_USERNAME || '';
 const NAKAMA_PASSWORD = process.env.NAKAMA_PASSWORD || '';
 
+// EchoTaxi's Discord user ID. While Discord has EchoTaxi's message-content
+// access suspended, it only sees a link if the same message @mentions it, so
+// match messages @mention it in the join line (and allow exactly that one ping).
+// Defaults to EchoTaxi's real ID. Set ECHOTAXI_BOT_ID=off once EchoTaxi can
+// read plain links again, or to another ID to override.
+const DEFAULT_ECHOTAXI_BOT_ID = '1208822908089278564';
+const ECHOTAXI_BOT_ID = parseEchoTaxiId(process.env.ECHOTAXI_BOT_ID);
+
 // Any single HTTP call that takes longer than this is abandoned, so one hung
 // request can never freeze the poll loop (Node's fetch has no default timeout).
 const HTTP_TIMEOUT_MS = 8_000;
@@ -58,6 +65,15 @@ const HEARTBEAT_MS = 60_000;
 const _webhookParts = DISCORD_WEBHOOK_URL.match(/webhooks\/(\d+)\/([^/?]+)/);
 const WEBHOOK_ID = _webhookParts?.[1] || '';
 const WEBHOOK_TOKEN = _webhookParts?.[2] || '';
+
+export function parseEchoTaxiId(raw) {
+    const v = String(raw ?? '').trim();
+    if (v === '') return DEFAULT_ECHOTAXI_BOT_ID;
+    if (/^(off|false|no|0|none)$/i.test(v)) return '';
+    if (/^\d{17,20}$/.test(v)) return v;
+    console.warn(`[config] ECHOTAXI_BOT_ID "${v}" is not a Discord user ID, using the default`);
+    return DEFAULT_ECHOTAXI_BOT_ID;
+}
 
 export function parsePollInterval(raw) {
     if (raw == null || raw === '') return DEFAULT_POLL_INTERVAL_MS;
@@ -80,10 +96,14 @@ export function parsePollInterval(raw) {
  *   1 (implicit, no `format` key) — embed queue + embed match messages
  *   2 — Components V2 queue + Components V2 match messages
  *   3 — Components V2 queue + embed match messages (join link in content)
+ *   4 — Components V2 queue + Components V2 match messages (same layout and
+ *       recovery marker as format 2, plus the EchoTaxi mention)
  * A message can't be switched between embed and V2 in place, so on upgrade
  * any message in the wrong format is deleted once and re-posted.
  */
-const STATE_FORMAT = 3;
+const STATE_FORMAT = 4;
+// Formats whose messages are all still valid in the current format.
+const COMPATIBLE_FORMATS = new Set([2, STATE_FORMAT]);
 
 function defaultState() {
     return {
@@ -137,13 +157,12 @@ export function parseState(raw) {
         }
     }
 
-    if (saved.format !== STATE_FORMAT) {
-        // Match messages from any older format are in the wrong format (format 1
-        // lacked the full match ID, format 2 was V2) — replace them all. The
-        // queue message is only kept when it's already V2 (format 2).
+    if (!COMPATIBLE_FORMATS.has(saved.format)) {
+        // Format 3 had a V2 queue (kept) but embed match messages (replaced).
+        // Format 1 was all embeds (all replaced).
         const legacyMessageIds = Object.values(matchMessages);
         if (isSnowflake(saved.matchMessageId)) legacyMessageIds.push(saved.matchMessageId);
-        if (saved.format === 2) next.queueMessageId = queueId;
+        if (saved.format === 3) next.queueMessageId = queueId;
         else if (queueId) legacyMessageIds.push(queueId);
         return { state: next, legacyMessageIds, error: null };
     }
@@ -315,15 +334,19 @@ async function unpinMessage(messageId) {
     } catch (_) { }
 }
 
+/** @returns {Promise<boolean>} true if the message is gone (deleted, or already missing) */
 async function deleteDiscordMessage(messageId) {
-    if (!messageId || !webhook) return;
+    if (!messageId || !webhook) return false;
     lastRender.delete(messageId);
     try {
         await unpinMessage(messageId);
         await webhook.deleteMessage(messageId);
         console.log('[discord] Deleted message:', messageId);
+        return true;
     } catch (e) {
-        if (!isUnknownMessage(e)) logDiscordError(`Could not delete message ${messageId}`, e);
+        if (isUnknownMessage(e)) return true;
+        logDiscordError(`Could not delete message ${messageId}`, e);
+        return false;
     }
 }
 
@@ -514,10 +537,10 @@ const IDLE_GREY = 0x6b7280;
 const MAX_LISTED_PLAYERS = 12;
 const MAX_LISTED_TICKETS = 20;
 const QUEUE_TITLE = '## ⚔️ Combat Queue';
-// V2 match messages (format 2) carried this marker; recovery uses it to find and replace them.
-const V2_MATCH_ID_RE = /Match `([^`\s]+)`/;
-// Embed footer marker used by startup recovery to map a message back to its match.
-const MATCH_FOOTER_PREFIX = 'Match ID: ';
+// Footer marker used by startup recovery to map a message back to its match.
+const MATCH_ID_RE = /Match `([^`\s]+)`/;
+// Embed footer marker of format-3 match messages; recovery replaces those.
+const LEGACY_MATCH_FOOTER_PREFIX = 'Match ID: ';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const text = (content) => new TextDisplayBuilder().setContent(content);
@@ -584,9 +607,10 @@ export function buildQueueMessage(playerCount, tickets = null, { activeMatches =
 
 /**
  * @param {object} label - one entry of statusData.labels
- * @param {{ updatedAt?: number }} [opts]
+ * @param {{ updatedAt?: number, taxiMentionId?: string }} [opts]
+ *   taxiMentionId — EchoTaxi's user ID to @mention in the join line
  */
-export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
+export function buildMatchMessage(label, { updatedAt = Date.now(), taxiMentionId = '' } = {}) {
     const players = Array.isArray(label?.players) ? label.players.filter((p) => p && typeof p === 'object') : [];
     const blueTeam = players.filter((p) => normalizeTeam(p) === 'blue');
     const orangeTeam = players.filter((p) => normalizeTeam(p) === 'orange');
@@ -618,7 +642,7 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
 
     // ── Header: map, region, capacity, lobby state
     const mapName = formatMapName(label?.level) || 'Unknown map';
-    const region = typeof label?.broadcaster?.region === 'string' ? escapeMarkdown(label.broadcaster.region) : null;
+    const region = typeof label?.broadcaster?.region === 'string' ? escapeMarkdown(label.broadcaster.region.slice(0, 64)) : null;
     const flag = flagEmoji(label?.broadcaster?.country_code);
     const playerCount = toFinite(label?.player_count) ?? (blueTeam.length + orangeTeam.length);
     const playerLimit = toFinite(label?.player_limit);
@@ -627,60 +651,64 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
     headerBits.push(`👥 ${playerCount}/${playerLimit ?? '?'}`);
     if (typeof label?.open === 'boolean') headerBits.push(label.open ? '🟢 Open' : '🔴 Closed');
 
+    const container = new ContainerBuilder()
+        .setAccentColor(accent)
+        .addTextDisplayComponents(text(`## 🎮 Combat · ${mapName}\n${headerBits.join(' · ')}`.slice(0, 400)));
+
+    // ── Join link: a raw, clickable URL in its own text display — NOT a button or
+    // masked link. EchoTaxi reacts 🚕 to it so players can haul a join request.
+    // While Discord has EchoTaxi's message-content access suspended it only sees
+    // messages that @mention it, hence the mention (see v2Payload's allowedMentions).
+    if (taxiUrl) {
+        const mention = taxiMentionId ? `<@${taxiMentionId}> ` : '';
+        container.addTextDisplayComponents(text(`${mention}🚕 **Join:** ${taxiUrl}`));
+    }
+
     // ── Live state: score, clock, start time, payload progress
-    const lines = [headerBits.join(' · ')];
+    const stateLines = [];
     if (blueScore != null && orangeScore != null) {
-        lines.push(`### 🔵 ${blueScore}  –  ${orangeScore} 🟠${round != null ? `  ·  Round ${round}` : ''}`);
+        stateLines.push(`### 🔵 ${blueScore}  –  ${orangeScore} 🟠${round != null ? `  ·  Round ${round}` : ''}`);
     }
     const sb = gs?.session_scoreboard;
     const clock = formatClock(sb?.game_time_ns);
     if (clock) {
         const roundLen = formatClock(sb?.round_duration_ns);
-        lines.push(clock.negative
+        stateLines.push(clock.negative
             ? `⏱️ Starting in **${clock.text}**`
             : `⏱️ **${clock.text}**${roundLen && !roundLen.negative && roundLen.text !== '0:00' ? ` / ${roundLen.text}` : ''}`);
     }
     const startMs = Date.parse(label?.start_time);
     if (Number.isFinite(startMs) && startMs > 0) {
-        lines.push(startMs > updatedAt ? `🕒 Starts ${discordTime(startMs)}` : `🕒 Started ${discordTime(startMs)}`);
+        stateLines.push(startMs > updatedAt ? `🕒 Starts ${discordTime(startMs)}` : `🕒 Started ${discordTime(startMs)}`);
     }
     const distance = toFinite(payload?.distance);
-    if (distance != null) lines.push(`📦 Payload distance **${distance.toFixed(2)}**`);
+    if (distance != null) stateLines.push(`📦 Payload distance **${distance.toFixed(2)}**`);
     if (payload?.checkpoint != null && ['string', 'number'].includes(typeof payload.checkpoint)) {
-        lines.push(`🚩 Checkpoint **${escapeMarkdown(String(payload.checkpoint))}**`);
+        stateLines.push(`🚩 Checkpoint **${escapeMarkdown(String(payload.checkpoint).slice(0, 64))}**`);
+    }
+    if (stateLines.length) {
+        container.addSeparatorComponents(divider()).addTextDisplayComponents(text(stateLines.join('\n').slice(0, 600)));
     }
 
-    const embed = new EmbedBuilder()
-        .setColor(accent)
-        .setTitle(`🎮 Combat · ${mapName}`.slice(0, 256))
-        .setFooter({ text: `${MATCH_FOOTER_PREFIX}${fullMatchId}`.slice(0, 2048) });
-
-    // ── Rosters
-    const roster = (list) => (bulletList(list.map((p) => `• ${safePlayerName(p)}`), MAX_LISTED_PLAYERS) || '-# No players').slice(0, 1024);
+    // ── Rosters (each block is capped so the whole message stays under
+    // Discord's 4000-character limit for V2 text)
+    const roster = (list) => bulletList(list.map((p) => `• ${safePlayerName(p)}`), MAX_LISTED_PLAYERS) || '-# No players';
     if (blueTeam.length || orangeTeam.length) {
-        embed.addFields(
-            { name: `🔵 Blue Team · ${blueTeam.length}`, value: roster(blueTeam), inline: true },
-            { name: `🟠 Orange Team · ${orangeTeam.length}`, value: roster(orangeTeam), inline: true },
-        );
+        container
+            .addSeparatorComponents(divider())
+            .addTextDisplayComponents(
+                text(`**🔵 Blue Team · ${blueTeam.length}**\n${roster(blueTeam)}`.slice(0, 1000)),
+                text(`**🟠 Orange Team · ${orangeTeam.length}**\n${roster(orangeTeam)}`.slice(0, 1000)),
+            );
     }
     if (spectators.length) {
         const names = spectators.slice(0, MAX_LISTED_PLAYERS).map(safePlayerName).join(', ');
         const more = spectators.length > MAX_LISTED_PLAYERS ? ` +${spectators.length - MAX_LISTED_PLAYERS} more` : '';
-        embed.addFields({ name: `👁 Spectators · ${spectators.length}`, value: `${names}${more}`.slice(0, 1024), inline: false });
+        container.addTextDisplayComponents(text(`-# 👁 Spectators (${spectators.length}): ${names}${more}`.slice(0, 600)));
     }
 
-    // ── Join link: deliberately the raw URL in the message *content*, outside the
-    // embed and NOT a button. Another bot watches message content for echo.taxi
-    // links and reacts with 🚕 so players can press it to haul a join request.
-    // (This is why match messages are embeds: Components V2 messages can't have content.)
-    const content = taxiUrl ? `🚕 **Join:** ${taxiUrl}` : '';
-
-    // Signature covers everything visible except the "updated …" line.
-    embed.setDescription(lines.join('\n'));
-    const signature = JSON.stringify({ content, embed: embed.toJSON() });
-    embed.setDescription(`${lines.join('\n')}\n-# updated ${discordTime(updatedAt)}`.slice(0, 4096));
-
-    return { embed, content, signature, fullMatchId };
+    const built = finalize(container, `-# Match \`${fullMatchId.slice(0, 120)}\` · updated ${discordTime(updatedAt)}`);
+    return { ...built, fullMatchId };
 }
 
 // ── Startup recovery helpers ──────────────────────────────────────────────────
@@ -702,9 +730,9 @@ export function extractComponentText(components) {
 
 /**
  * Classify a raw channel message posted by our webhook.
- *   queue  — current V2 queue message
- *   match  — current embed match message (full match ID in the footer)
- *   legacy — any older-format bot message, to be deleted and re-posted
+ *   queue  — V2 queue message
+ *   match  — V2 match message (full match ID in the footer)
+ *   legacy — any embed-era bot message (formats 1 and 3), to be deleted and re-posted
  * @returns {{ kind: 'queue' } | { kind: 'match', matchId: string } | { kind: 'legacy' } | null}
  */
 export function classifyOwnMessage(msg) {
@@ -713,14 +741,11 @@ export function classifyOwnMessage(msg) {
     if (isV2) {
         const body = extractComponentText(msg.components);
         if (body.includes(QUEUE_TITLE)) return { kind: 'queue' };
-        return V2_MATCH_ID_RE.test(body) ? { kind: 'legacy' } : null; // format-2 match message
+        const m = body.match(MATCH_ID_RE);
+        return m ? { kind: 'match', matchId: m[1] } : null;
     }
     const embed = msg.embeds?.[0];
-    const footer = embed?.footer?.text || '';
-    if (footer.startsWith(MATCH_FOOTER_PREFIX)) {
-        const matchId = footer.slice(MATCH_FOOTER_PREFIX.length).trim();
-        if (matchId) return { kind: 'match', matchId };
-    }
+    if ((embed?.footer?.text || '').startsWith(LEGACY_MATCH_FOOTER_PREFIX)) return { kind: 'legacy' };
     return /Combat Queue|Active Combat Match/.test(embed?.title || '') ? { kind: 'legacy' } : null;
 }
 
@@ -734,20 +759,18 @@ function needsEdit(messageId, signature, now) {
     return !last || last.signature !== signature || now - last.at >= HEARTBEAT_MS;
 }
 
-function v2Payload(container) {
+/**
+ * @param {ContainerBuilder} container
+ * @param {string[]} [mentionUsers] - the only user IDs allowed to be mentioned
+ *   (EchoTaxi on match messages). A suppressed mention doesn't count as a
+ *   mention, so EchoTaxi would still be unable to see the message.
+ */
+export function v2Payload(container, mentionUsers = []) {
     return {
         components: [container],
         flags: MessageFlags.IsComponentsV2,
         withComponents: true, // required for components on a non-application webhook
-        allowedMentions: { parse: [] }, // player names must never ping anyone
-    };
-}
-
-function matchPayload(content, embed) {
-    return {
-        content, // raw echo.taxi URL — must stay in content, see buildMatchMessage
-        embeds: [embed],
-        allowedMentions: { parse: [] },
+        allowedMentions: { parse: [], users: mentionUsers }, // player names must never ping anyone
     };
 }
 
@@ -759,8 +782,9 @@ async function handleQueueMessage(playerCount, tickets, activeMatches, now) {
     // is posted at the bottom of the channel instead of an old one being edited
     // somewhere up in the history where nobody sees it.
     if (playerCount === 0) {
-        if (state.queueMessageId) {
-            await deleteDiscordMessage(state.queueMessageId);
+        // Only forget the ID once the message is really gone; otherwise retry next poll
+        // instead of leaving an orphaned, pinned queue message behind.
+        if (state.queueMessageId && await deleteDiscordMessage(state.queueMessageId)) {
             state.queueMessageId = null;
             saveState();
         }
@@ -804,16 +828,16 @@ async function handleAllMatchMessages(builtMatches, now) {
 
     // Delete messages for games that ended
     for (const [matchId, msgId] of Object.entries(state.matchMessages)) {
-        if (!activeIds.has(matchId)) {
-            await deleteDiscordMessage(msgId);
+        if (!activeIds.has(matchId) && await deleteDiscordMessage(msgId)) {
             delete state.matchMessages[matchId];
             saveState();
         }
     }
 
     // Post or edit a message for each active game
-    for (const { embed, content, signature, fullMatchId } of builtMatches) {
-        const payload = matchPayload(content, embed);
+    const mentionUsers = ECHOTAXI_BOT_ID ? [ECHOTAXI_BOT_ID] : [];
+    for (const { container, signature, fullMatchId } of builtMatches) {
+        const payload = v2Payload(container, mentionUsers);
         const shortId = fullMatchId.slice(0, 8);
         const existingMsgId = state.matchMessages[fullMatchId];
         try {
@@ -873,7 +897,7 @@ async function poll() {
         const builtMatches = [];
         for (const label of combatLabels) {
             try {
-                builtMatches.push(buildMatchMessage(label, { updatedAt: now }));
+                builtMatches.push(buildMatchMessage(label, { updatedAt: now, taxiMentionId: ECHOTAXI_BOT_ID }));
             } catch (e) {
                 // One odd label must not stop every other message from updating
                 console.error(`[poll] Could not build message for match ${String(label.id).slice(0, 8)}:`, e.message);
@@ -952,11 +976,10 @@ const newestFirst = (a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : -1);
  * by this webhook and adopt them, so the bot edits instead of re-posting even
  * when state.json was wiped (e.g. Render ephemeral disk):
  *   - Queue message: adopt the newest, delete duplicates.
- *   - Match messages: adopt by the full match ID in the embed footer, delete
+ *   - Match messages: adopt by the full match ID in the footer, delete
  *     duplicates. Messages for matches that have since ended are removed on
  *     the first poll.
- *   - Older-format messages (embed queue, V2 match, pre-ID embeds): delete
- *     (re-posted fresh in the current format).
+ *   - Embed-era messages (formats 1 and 3): delete (re-posted fresh as V2).
  */
 async function recoverMessages() {
     if (!DISCORD_BOT_TOKEN || !channelId || !WEBHOOK_ID) return;
@@ -1028,6 +1051,7 @@ async function main() {
     console.log(`[bot] Status: ${nakamaConfigured ? `${NAKAMA_URL} (authenticated)` : `${STATUS_URL} (public)`}`);
     console.log(`[bot] Poll interval: ${POLL_INTERVAL_MS}ms`);
     console.log(`[bot] Pinning: ${DISCORD_BOT_TOKEN ? 'enabled' : 'disabled (set DISCORD_BOT_TOKEN to enable)'}`);
+    console.log(`[bot] EchoTaxi mention: ${ECHOTAXI_BOT_ID ? `enabled (<@${ECHOTAXI_BOT_ID}>)` : 'off (ECHOTAXI_BOT_ID=off)'}`);
 
     webhook = new WebhookClient({ url: DISCORD_WEBHOOK_URL });
 
@@ -1037,7 +1061,7 @@ async function main() {
 
     if (legacyIds.length) {
         for (const id of legacyIds) await deleteDiscordMessage(id);
-        saveState(); // persist format: 2 so this only happens once
+        saveState(); // persist the new format so this only happens once
     }
 
     // Establish Nakama session before first poll (if configured)
