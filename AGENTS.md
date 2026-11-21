@@ -5,7 +5,7 @@
 A Discord bot for the [EchoVRCE](https://echovrce.com) community. It polls
 the public match status API at `https://g.echovrce.com/status/matches` on a
 configurable interval (default 10s) and posts live Discord **Components V2**
-messages (containers, sections, text displays, separators, link buttons)
+messages (containers, text displays, separators)
 showing:
 
 - How many players are currently queued for Combat matchmaking
@@ -88,7 +88,11 @@ anywhere
 - **Never add interactive components (select menus, non-link buttons).**
   A plain channel webhook can only send non-interactive components
   (`withComponents: true`), and handling interactions needs an
-  application/gateway. Link buttons are fine.
+  application/gateway.
+- **Never turn the echo.taxi join link into a button or masked link.** It
+  must stay a raw, clickable `https://echo.taxi/...` URL in the message text:
+  another bot detects it and reacts with 🚕 so players can haul a join
+  request.
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.

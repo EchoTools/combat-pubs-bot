@@ -162,14 +162,13 @@ test('labels are ordered oldest first regardless of API order', () => {
 
 // ── Message builders ─────────────────────────────────────────────────────────
 
-test('match message builds valid Components V2 JSON with a Join link button', () => {
+test('match message builds valid Components V2 JSON with a plain clickable join link', () => {
     const built = buildMatchMessage(label(), { updatedAt: Date.parse('2026-11-21T20:14:00Z') });
     const json = built.container.toJSON();
     assert.equal(json.type, ComponentType.Container);
-    const section = json.components.find((c) => c.type === ComponentType.Section);
-    assert.ok(section, 'header section present');
-    assert.equal(section.accessory.url, `https://echo.taxi/spark://c/${UUID}`);
+    assert.ok(!JSON.stringify(json).includes('"style":5'), 'no link button — the URL must be plain text');
     const body = allText(built);
+    assert.ok(body.includes(`🚕 **Join:** https://echo.taxi/spark://c/${UUID}`), 'raw join URL in text');
     assert.match(body, /Combat · Dyson/);
     assert.match(body, /🇩🇪 Saxony/);
     assert.match(body, /👥 2\/8/);
@@ -191,7 +190,8 @@ test('match message survives malformed fields without throwing', () => {
     });
     const built = buildMatchMessage(weird);
     const json = built.container.toJSON();
-    assert.ok(!json.components.some((c) => c.type === ComponentType.Section), 'no Join button for an invalid match id');
+    assert.doesNotThrow(() => built.container.toJSON());
+    assert.ok(!allText(built).includes('echo.taxi'), 'no join link for an invalid match id');
     assert.match(allText(built), /Unknown map/);
 });
 
