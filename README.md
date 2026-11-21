@@ -5,7 +5,7 @@
 A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API every 10 seconds and posts live [Components V2](https://discord.com/developers/docs/components/reference) messages showing:
 
 - **Combat queue** — number of players currently searching for a Combat match
-- **Active matches** — one pinned message per live Combat game with score, clock, map, region, team rosters, and an [echo.taxi](https://echo.taxi) **Join** button
+- **Active matches** — one pinned message per live Combat game with score, clock, map, region, team rosters, and a clickable [echo.taxi](https://echo.taxi) join link
 
 Messages are edited in-place across restarts using message IDs persisted to `state.json`.
 The bot can also optionally authenticate with Nakama for richer queue details if you provide Nakama credentials.

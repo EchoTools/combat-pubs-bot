@@ -8,7 +8,7 @@
  *
  * Uses a Discord webhook for posting/editing (with_components=true, so the
  * non-interactive V2 components — containers, sections, text displays,
- * separators, link buttons — are allowed on a plain channel webhook).
+ * separators — are allowed on a plain channel webhook).
  * An optional DISCORD_BOT_TOKEN enables automatic pinning and startup
  * recovery. Message IDs are persisted to state.json so edits survive restarts.
  */
@@ -17,12 +17,9 @@ import 'dotenv/config';
 import {
     WebhookClient,
     ContainerBuilder,
-    SectionBuilder,
     TextDisplayBuilder,
     SeparatorBuilder,
     SeparatorSpacingSize,
-    ButtonBuilder,
-    ButtonStyle,
     MessageFlags,
     escapeMarkdown,
 } from 'discord.js';
@@ -610,7 +607,7 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
         accent = blueScore > orangeScore ? TEAM_BLUE : TEAM_ORANGE;
     }
 
-    // ── Header: map, region, capacity, lobby state + Join button accessory
+    // ── Header: map, region, capacity, lobby state
     const mapName = formatMapName(label?.level) || 'Unknown map';
     const region = typeof label?.broadcaster?.region === 'string' ? escapeMarkdown(label.broadcaster.region) : null;
     const flag = flagEmoji(label?.broadcaster?.country_code);
@@ -622,16 +619,12 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
     if (typeof label?.open === 'boolean') headerBits.push(label.open ? '🟢 Open' : '🔴 Closed');
     const header = text(`## 🎮 Combat · ${mapName}\n${headerBits.join(' · ')}`);
 
-    const container = new ContainerBuilder().setAccentColor(accent);
-    if (taxiUrl) {
-        container.addSectionComponents(
-            new SectionBuilder()
-                .addTextDisplayComponents(header)
-                .setButtonAccessory(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Join').setEmoji('🚕').setURL(taxiUrl)),
-        );
-    } else {
-        container.addTextDisplayComponents(header);
-    }
+    const container = new ContainerBuilder().setAccentColor(accent).addTextDisplayComponents(header);
+
+    // ── Join link: deliberately a plain, raw URL in the text — NOT a link button.
+    // Another bot watches for echo.taxi links and reacts with 🚕 so players can
+    // press it to haul a join request; it needs the clickable URL in the text.
+    if (taxiUrl) container.addTextDisplayComponents(text(`🚕 **Join:** ${taxiUrl}`));
 
     // ── Live state: score, clock, start time, payload progress
     const stateLines = [];
