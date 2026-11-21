@@ -4,19 +4,22 @@
 
 A Discord bot for the [EchoVRCE](https://echovrce.com) community. It polls
 the public match status API at `https://g.echovrce.com/status/matches` on a
-configurable interval and posts live Discord embeds showing:
+configurable interval (default 10s) and posts live Discord **Components V2**
+messages (containers, sections, text displays, separators, link buttons)
+showing:
 
 - How many players are currently queued for Combat matchmaking
 - One pinned embed per active public Combat match — team rosters, match
   time, map, region, and an [echo.taxi](https://echo.taxi) join link
 
-Embeds are edited in-place (not re-posted) and survive restarts via message
-IDs persisted to `state.json`. The bot uses a Discord webhook for
+Messages are edited in-place (not re-posted) and survive restarts via message
+IDs persisted to `state.json` (`format: 2`; older embed-era state is migrated
+once by deleting and re-posting). The queue message stays up at 0 queued. The bot uses a Discord webhook for
 posting/editing and an optional bot token for auto-pinning and cleanup.
 
 **Language:** JavaScript (Node.js, ES modules)
 **Runtime:** Node.js >= 18
-**Dependencies:** `discord.js` (webhook client, embed builder), `dotenv`
+**Dependencies:** `discord.js` >= 14.19 (webhook client, Components V2 builders), `dotenv`
 (`.env` loading for local development)
 **Deployment:** Render Background Worker (`render.yaml`), or `node bot.js`
 anywhere
@@ -82,6 +85,10 @@ anywhere
   to state are used on subsequent polls and across restarts. Dropping state
   means orphaned pinned messages in the channel that nobody can edit or
   clean up.
+- **Never add interactive components (select menus, non-link buttons).**
+  A plain channel webhook can only send non-interactive components
+  (`withComponents: true`), and handling interactions needs an
+  application/gateway. Link buttons are fine.
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.
@@ -125,6 +132,7 @@ render.yaml             # Render.com Background Worker deployment config
 get-discord-token.js    # LEGACY — Nakama token setup (not used by current bot)
 setup-token.bat         # LEGACY — Windows wrapper for get-discord-token.js
 start-bot.bat           # Windows convenience launcher
+test/bot.test.js        # node:test suite — builders, parsing, error paths
 state.json              # Runtime state — message IDs (gitignored, ephemeral)
 AGENTS.md               # This file
 CLAUDE.md               # Points here
@@ -154,8 +162,13 @@ and optionally `DISCORD_BOT_TOKEN` in the Render dashboard. The
 
 ### Tests
 
-No test suite exists yet. When adding one:
-- Use the Node.js built-in test runner (`node:test`) or `vitest`
+```bash
+npm test
+```
+
+`bot.js` only starts the bot when run directly, so its pure helpers can be
+imported by tests. When extending the suite:
+- Use the Node.js built-in test runner (`node:test`)
 - Test error paths: API failures, malformed responses, state corruption
 - Mock `fetch` and the Discord webhook client at the boundary
 - Do not test Discord API behavior — test the bot's response to Discord
