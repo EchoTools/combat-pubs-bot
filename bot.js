@@ -316,14 +316,17 @@ async function unpinMessage(messageId) {
 }
 
 async function deleteDiscordMessage(messageId) {
-    if (!messageId || !webhook) return;
+    if (!messageId || !webhook) return false;
     lastRender.delete(messageId);
     try {
         await unpinMessage(messageId);
         await webhook.deleteMessage(messageId);
         console.log('[discord] Deleted message:', messageId);
+        return true;
     } catch (e) {
-        if (!isUnknownMessage(e)) logDiscordError(`Could not delete message ${messageId}`, e);
+        if (isUnknownMessage(e)) return true;
+        logDiscordError(`Could not delete message ${messageId}`, e);
+        return false;
     }
 }
 
@@ -676,9 +679,11 @@ export function buildMatchMessage(label, { updatedAt = Date.now() } = {}) {
     const content = taxiUrl ? `🚕 **Join:** ${taxiUrl}` : '';
 
     // Signature covers everything visible except the "updated …" line.
-    embed.setDescription(lines.join('\n'));
+    // Reserve a fixed amount for the timestamp so its digit count cannot change the signature.
+    const description = lines.join('\n').slice(0, 4096 - 32);
+    embed.setDescription(description);
     const signature = JSON.stringify({ content, embed: embed.toJSON() });
-    embed.setDescription(`${lines.join('\n')}\n-# updated ${discordTime(updatedAt)}`.slice(0, 4096));
+    embed.setDescription(`${description}\n-# updated ${discordTime(updatedAt)}`);
 
     return { embed, content, signature, fullMatchId };
 }
@@ -759,8 +764,7 @@ async function handleQueueMessage(playerCount, tickets, activeMatches, now) {
     // is posted at the bottom of the channel instead of an old one being edited
     // somewhere up in the history where nobody sees it.
     if (playerCount === 0) {
-        if (state.queueMessageId) {
-            await deleteDiscordMessage(state.queueMessageId);
+        if (state.queueMessageId && await deleteDiscordMessage(state.queueMessageId)) {
             state.queueMessageId = null;
             saveState();
         }

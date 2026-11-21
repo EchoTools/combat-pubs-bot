@@ -258,6 +258,18 @@ test('signature ignores the "updated" timestamp but tracks real changes', () => 
     assert.notEqual(a.signature, c.signature);
 });
 
+test('oversized match descriptions leave room for the updated timestamp', () => {
+    const oversized = label({ broadcaster: { region: 'x'.repeat(5000) } });
+    const a = buildMatchMessage(oversized, { updatedAt: 999_999_999_000 });
+    const b = buildMatchMessage(oversized, { updatedAt: 1_000_000_000_000 });
+    const description = b.embed.toJSON().description;
+    const suffix = '\n-# updated <t:1000000000:R>';
+    assert.ok(description.length <= 4096);
+    assert.ok(description.endsWith(suffix));
+    assert.equal(JSON.parse(b.signature).embed.description, description.slice(0, -suffix.length));
+    assert.equal(a.signature, b.signature);
+});
+
 test('queue message builds for zero, counts and malformed tickets', () => {
     const zero = buildQueueMessage(0);
     assert.match(allText(zero), /# 0\nplayers searching/);
