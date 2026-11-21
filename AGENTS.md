@@ -4,17 +4,19 @@
 
 A Discord bot for the [EchoVRCE](https://echovrce.com) community. It polls
 the public match status API at `https://g.echovrce.com/status/matches` on a
-configurable interval (default 10s) and posts live Discord **Components V2**
-messages (containers, text displays, separators)
-showing:
+configurable interval (default 10s) and posts live Discord messages showing:
 
-- How many players are currently queued for Combat matchmaking
-- One pinned embed per active public Combat match — team rosters, match
-  time, map, region, and an [echo.taxi](https://echo.taxi) join link
+- How many players are currently queued for Combat matchmaking — a
+  **Components V2** message (container, text displays, separators). It is
+  deleted when nobody is queued and posted fresh (at the bottom of the
+  channel) when someone queues again.
+- One pinned **embed** per active public Combat match — score, clock, map,
+  region, team rosters — with the [echo.taxi](https://echo.taxi) join link as
+  raw text in the message content, outside the embed (see below for why).
 
 Messages are edited in-place (not re-posted) and survive restarts via message
-IDs persisted to `state.json` (`format: 2`; older embed-era state is migrated
-once by deleting and re-posting). The queue message stays up at 0 queued. The bot uses a Discord webhook for
+IDs persisted to `state.json` (`format: 3`; messages from older formats are
+deleted and re-posted once on upgrade). The bot uses a Discord webhook for
 posting/editing and an optional bot token for auto-pinning and cleanup.
 
 **Language:** JavaScript (Node.js, ES modules)
@@ -89,10 +91,12 @@ anywhere
   A plain channel webhook can only send non-interactive components
   (`withComponents: true`), and handling interactions needs an
   application/gateway.
-- **Never turn the echo.taxi join link into a button or masked link.** It
-  must stay a raw, clickable `https://echo.taxi/...` URL in the message text:
-  another bot detects it and reacts with 🚕 so players can haul a join
-  request.
+- **Never move the echo.taxi join link out of the message content.** It
+  must stay a raw, clickable `https://echo.taxi/...` URL in the message
+  `content`, outside the embed — not a button, masked link, embed field, or
+  V2 text display. Another bot reads message content, detects the link, and
+  reacts with 🚕 so players can haul a join request. This is also why match
+  messages are embeds, not Components V2: V2 messages cannot have content.
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.
