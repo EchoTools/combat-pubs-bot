@@ -4,19 +4,19 @@
 
 A Discord bot for the [EchoVRCE](https://echovrce.com) community. It polls
 the public match status API at `https://g.echovrce.com/status/matches` on a
-configurable interval (default 10s) and posts live Discord messages showing:
+configurable interval (default 10s) and posts live Discord **Components V2**
+messages (containers, text displays, separators) showing:
 
-- How many players are currently queued for Combat matchmaking — a
-  **Components V2** message (container, text displays, separators). It is
-  deleted when nobody is queued and posted fresh (at the bottom of the
-  channel) when someone queues again.
-- One pinned **embed** per active public Combat match — score, clock, map,
-  region, team rosters — with the [echo.taxi](https://echo.taxi) join link as
-  raw text in the message content, outside the embed (see below for why).
+- How many players are currently queued for Combat matchmaking. The queue
+  message is deleted when nobody is queued and posted fresh (at the bottom of
+  the channel) when someone queues again.
+- One pinned message per active public Combat match — score, clock, map,
+  region, team rosters — with an [echo.taxi](https://echo.taxi) join link
+  that @mentions EchoTaxi (see below for why).
 
 Messages are edited in-place (not re-posted) and survive restarts via message
-IDs persisted to `state.json` (`format: 3`; messages from older formats are
-deleted and re-posted once on upgrade). The bot uses a Discord webhook for
+IDs persisted to `state.json` (`format: 4`; embed-era messages from older
+formats are deleted and re-posted once on upgrade). The bot uses a Discord webhook for
 posting/editing and an optional bot token for auto-pinning and cleanup.
 
 **Language:** JavaScript (Node.js, ES modules)
@@ -30,13 +30,13 @@ anywhere
 
 - **Not a Discord gateway bot.** It does not use the Discord gateway, does
   not listen to messages, does not respond to commands. It is a
-  poll-and-post webhook client. The optional bot token is used over REST
-  only: pinning, deleting pin system notifications, startup recovery, and
-  (when enabled) next-match reactions — not for gateway features.
-- **Nakama is optional.** By default the bot uses only the public
-  unauthenticated status endpoint. With `NAKAMA_*` set it can also use the
-  authenticated status RPCs and the next-match feature.
-  `get-discord-token.js` and `setup-token.bat` are legacy artifacts.
+  poll-and-post webhook client. The optional bot token is used exclusively
+  for pinning messages and deleting pin system notifications — not for
+  gateway features.
+- **Not a Nakama client.** Earlier versions used the Nakama RPC API with
+  authentication tokens. The current version uses only the public
+  unauthenticated status endpoint. `get-discord-token.js` and
+  `setup-token.bat` are legacy artifacts from the authenticated API era.
 - **Not part of Metis core infrastructure.** It does not touch Logos, the
   Privacy Gate, the Write Router, or any memory substrates. The Metis
   non-negotiable constraints (NC-1 through NC-7) do not apply directly.
@@ -91,38 +91,33 @@ anywhere
   A plain channel webhook can only send non-interactive components
   (`withComponents: true`), and handling interactions needs an
   application/gateway.
-- **Never move the echo.taxi join link out of the message content.** It
-  must stay a raw, clickable `https://echo.taxi/...` URL in the message
-  `content`, outside the embed — not a button, masked link, embed field, or
-  V2 text display. Another bot reads message content, detects the link, and
-  reacts with 🚕 so players can haul a join request. This is also why match
-  messages are embeds, not Components V2: V2 messages cannot have content.
+- **Never turn the echo.taxi join link into a button or masked link, or drop
+  the EchoTaxi mention.** The join line is its own text display:
+  `<@ECHOTAXI_BOT_ID> 🚕 **Join:** https://echo.taxi/spark://c/<uuid>`.
+  EchoTaxi detects the raw URL and reacts 🚕 so players can haul a join
+  request. While Discord has EchoTaxi's message-content access suspended it
+  only sees messages that @mention it, so `ECHOTAXI_BOT_ID` (defaults to
+  `1208822908089278564`; `off` disables) must stay in the join line and in
+  `allowedMentions.users` — a suppressed mention doesn't count as a mention.
+  If EchoTaxi turns out not to read V2 component text, match messages must
+  go back to an embed with the link in message `content` (state format 3,
+  see git history).
 - **Never add gateway intents or event listeners.** The bot is a webhook
   client. If a feature requires the Discord gateway, that is a design
   change that requires discussion, not an incremental addition.
-- **Never use the bot's operator privilege on anyone but the person who
-  asked.** Next-match reactions (`NEXT_MATCH_ENABLED`, approved by the
-  project owner 2026-11-21) call `player/setnextmatch`, which only lets
-  Global Operators target other users — and the bot's Nakama account is one.
-  The target MUST always be the reacting user's own Discord ID and the match
-  MUST be the one the message is for. If the Discord ID isn't linked, the
-  server silently targets the caller (the bot) and returns success; that
-  case must stay detected and reported as "not linked"
-  (`classifySetNextMatchResult`).
 
 ## Common Mistakes
 
-**Making Nakama required.** The public status endpoint is sufficient for
-queue counts and active match data; the bot must keep working with no
-`NAKAMA_*` values set. Authenticated features (currently: next-match
-reactions) stay optional: they only activate when the `NAKAMA_*` values
-are set. Do not add more without
-explicit approval. `get-discord-token.js` and `setup-token.bat` are legacy.
+**Adding Nakama authentication back.** The bot was simplified to use the
+public status endpoint. The `get-discord-token.js` and `setup-token.bat`
+files are legacy. Do not build new features on the authenticated Nakama API
+without explicit approval — the public endpoint is sufficient for queue
+counts and active match data.
 
 **Over-engineering the single-file structure.** The bot is 470 lines in one
 file. That is appropriate for its complexity. Do not split it into
 modules/classes/layers unless the functionality genuinely warrants it. A
-poll loop, some API calls, and some embed builders do not need an
+poll loop, some API calls, and some message builders do not need an
 architecture.
 
 **Ignoring Discord rate limits.** The Discord API rate-limits webhook
@@ -141,7 +136,7 @@ The check should remain inclusive (substring match) not exclusive
 
 ```
 bot.js                  # The entire bot — poll loop, Discord webhook,
-                        #   embed builders, state management
+                        #   V2 message builders, state management
 package.json            # Node.js project config, dependencies
 package-lock.json       # Pinned dependency versions (committed)
 .env.example            # Configuration template with documentation
@@ -202,12 +197,11 @@ in local dev, injected by Render in production).
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_WEBHOOK_URL` | Yes | — | Webhook URL for the target channel |
-| `DISCORD_BOT_TOKEN` | No | — | Bot token for auto-pinning, recovery, next-match reactions (Manage Messages, Add Reactions, Read Message History) |
-| `POLL_INTERVAL_MS` | No | `10000` | Poll frequency in milliseconds (min `5000`) |
+| `DISCORD_BOT_TOKEN` | No | — | Bot token for auto-pinning (Manage Messages permission) |
+| `POLL_INTERVAL_MS` | No | `10000` | Poll frequency in milliseconds |
 | `STATE_FILE` | No | `./state.json` | Path to the message ID persistence file |
-| `FILTER_GUILD_ID` | No | — | Restrict embeds to one guild/group ID |
-| `NAKAMA_URL` / `NAKAMA_HTTP_KEY` / `NAKAMA_USERNAME` / `NAKAMA_PASSWORD` | No | — | Bot's Nakama account (authenticated status path, next-match) |
-| `NEXT_MATCH_ENABLED` | No | `true` | ⏭️ reactions set the reactor's next match; needs bot token + `NAKAMA_*` + Global Operator account |
+| `FILTER_GUILD_ID` | No | — | Restrict messages to one guild/group ID |
+| `ECHOTAXI_BOT_ID` | No | `1208822908089278564` | EchoTaxi's user ID, @mentioned in each join line so it can see the link; `off` disables |
 
 ### Note on environment variables
 
@@ -216,7 +210,7 @@ predates the ecosystem's config-from-files standard
 ([GENERIC-PROJECT-ADDENDUM.md](/srv/src/metis-core/GENERIC-PROJECT-ADDENDUM.md)).
 The env-var pattern is acceptable here because (a) the Render deployment
 platform injects config as environment variables, and (b) the bot has only
-a handful of configuration values, all validated at startup. If the configuration
+five configuration values, all validated at startup. If the configuration
 grows beyond this, migrate to a config file with env-var override as the
 platform adaptation layer.
 

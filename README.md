@@ -2,10 +2,10 @@
 
 [![Build, push, and deploy combat-pubs-bot](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml)
 
-A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API every 10 seconds and posts live messages showing:
+A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API every 10 seconds and posts live [Components V2](https://discord.com/developers/docs/components/reference) messages showing:
 
-- **Combat queue** — a [Components V2](https://discord.com/developers/docs/components/reference) message with the number of players currently searching for a Combat match. It is removed when nobody is queued and re-posted at the bottom of the channel when someone queues.
-- **Active matches** — one pinned embed per live Combat game with score, clock, map, region and team rosters. The [echo.taxi](https://echo.taxi) join link is posted as a raw clickable URL in the message text, outside the embed, so other bots can detect it.
+- **Combat queue** — the number of players currently searching for a Combat match. It is removed when nobody is queued and re-posted at the bottom of the channel when someone queues.
+- **Active matches** — one pinned message per live Combat game with score, clock, map, region and team rosters, plus a raw clickable [echo.taxi](https://echo.taxi) join link that @mentions EchoTaxi (it can only see links in messages that mention it while its Discord message access is under review).
 
 Messages are edited in-place across restarts using message IDs persisted to `state.json`.
 The bot can also optionally authenticate with Nakama for richer queue details if you provide Nakama credentials.
@@ -36,12 +36,12 @@ cp .env.example .env
 | `DISCORD_WEBHOOK_URL` | Yes      | Webhook URL for the target channel            |
 | `DISCORD_BOT_TOKEN`   | Optional | Bot token — enables automatic message pinning |
 | `POLL_INTERVAL_MS`    | Optional | Poll frequency in ms (default: `10000`, min `5000`) |
-| `FILTER_GUILD_ID`     | Optional | Restrict embeds to one guild/group ID         |
+| `FILTER_GUILD_ID`     | Optional | Restrict messages to one guild/group ID       |
+| `ECHOTAXI_BOT_ID`     | Optional | EchoTaxi's user ID, @mentioned with each join link (defaults to EchoTaxi; `off` disables) |
 | `NAKAMA_URL`          | Optional | Nakama base URL (no trailing slash, no /v2)   |
 | `NAKAMA_HTTP_KEY`     | Optional | Nakama runtime http key for account RPCs      |
 | `NAKAMA_USERNAME`     | Optional | Bot account username for Nakama auth          |
 | `NAKAMA_PASSWORD`     | Optional | Bot account password for Nakama auth          |
-| `NEXT_MATCH_ENABLED`  | Optional | ⏭️ next-match reactions (default `true`; `false` turns them off) |
 
 When all four Nakama values are set, the bot authenticates with Nakama and uses the authenticated API path. If auth fails, it automatically falls back to the public endpoint.
 
@@ -52,18 +52,6 @@ In your Discord channel: **Settings → Integrations → Webhooks → New Webhoo
 #### Enabling auto-pinning (optional)
 
 Create a bot at [discord.com/developers/applications](https://discord.com/developers/applications), invite it to your server with the **Manage Messages** permission, and set `DISCORD_BOT_TOKEN`.
-
-#### Next-match reactions
-
-Players react ⏭️ on a match message and the bot sets that match as their next match — the same as EchoVRCE's `/next-match` command. Their reaction is removed within one poll (≤10s) and they get a DM with the result (e.g. if their Discord isn't linked to EchoVRCE).
-
-Requirements:
-
-1. `DISCORD_BOT_TOKEN` with **Manage Messages**, **Add Reactions** and **Read Message History** in the channel
-2. All four `NAKAMA_*` values, for a Nakama account that is a **Global Operator** (the `player/setnextmatch` RPC only lets operators set another user's next match)
-3. `NEXT_MATCH_ENABLED` left unset or `true` (it is on by default; set `false` to turn it off)
-
-The startup log says `Next-match reactions: enabled` or lists what's missing. The bot only ever sets the next match of the person who reacted.
 
 ### 3. Run the bot
 
