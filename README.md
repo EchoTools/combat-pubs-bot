@@ -2,12 +2,12 @@
 
 [![Build, push, and deploy combat-pubs-bot](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/EchoTools/combat-pubs-bot/actions/workflows/deploy.yml)
 
-A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API and posts live embeds showing:
+A Discord bot for [EchoVRCE](https://echovrce.com) that polls the public match status API every 10 seconds and posts live [Components V2](https://discord.com/developers/docs/components/reference) messages showing:
 
 - **Combat queue** — number of players currently searching for a Combat match
-- **Active matches** — one pinned embed per live Combat game with team rosters, match time, region, and an [echo.taxi](https://echo.taxi) join link
+- **Active matches** — one pinned message per live Combat game with score, clock, map, region, team rosters, and an [echo.taxi](https://echo.taxi) **Join** button
 
-Embeds are edited in-place across restarts using message IDs persisted to `state.json`.
+Messages are edited in-place across restarts using message IDs persisted to `state.json`.
 The bot can also optionally authenticate with Nakama for richer queue details if you provide Nakama credentials.
 
 ## Requirements
@@ -35,7 +35,7 @@ cp .env.example .env
 | --------------------- | -------- | --------------------------------------------- |
 | `DISCORD_WEBHOOK_URL` | Yes      | Webhook URL for the target channel            |
 | `DISCORD_BOT_TOKEN`   | Optional | Bot token — enables automatic message pinning |
-| `POLL_INTERVAL_MS`    | Optional | Poll frequency in ms (default: `10000`)       |
+| `POLL_INTERVAL_MS`    | Optional | Poll frequency in ms (default: `10000`, min `5000`) |
 | `FILTER_GUILD_ID`     | Optional | Restrict embeds to one guild/group ID         |
 | `NAKAMA_URL`          | Optional | Nakama base URL (no trailing slash, no /v2)   |
 | `NAKAMA_HTTP_KEY`     | Optional | Nakama runtime http key for account RPCs      |
@@ -84,7 +84,15 @@ Every `POLL_INTERVAL_MS` the bot fetches `https://g.echovrce.com/status/matches`
 
 1. Reads `active_matchmaking_counts` to get the number of players queuing for Combat
 2. Filters `labels` for active public Combat matches (optionally by `FILTER_GUILD_ID`)
-3. Posts or edits pinned Discord embeds for the queue count and each active match
-4. Deletes embeds for matches that have ended
+3. Posts or edits pinned Discord messages for the queue count and each active match (unchanged messages are not re-edited, to save rate limit)
+4. Deletes messages for matches that have ended
+
+Each message shows a live "updated …" Discord timestamp, so if the bot or the API stalls, viewers can see how old the data is. Snapshots older than the last one rendered are ignored.
+
+### Tests
+
+```bash
+npm test
+```
 
 Console output is change-driven — counts are only logged when the queue size or number of active matches changes.
